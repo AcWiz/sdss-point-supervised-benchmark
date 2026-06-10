@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import asin, cos, radians, sin, sqrt
@@ -72,11 +73,12 @@ def _match_catalogs_with_radius_fn(
     candidates: list[tuple[float, str, str]] = []
     truth_by_id = {record.source_id: record for record in truth}
     prediction_by_id = {record.prediction_id: record for record in predictions}
+    predictions_by_cutout: dict[str, list[PredictionRecord]] = defaultdict(list)
+    for prediction in predictions:
+        predictions_by_cutout[prediction.cutout_id].append(prediction)
 
     for truth_record in truth:
-        for prediction in predictions:
-            if truth_record.cutout_id != prediction.cutout_id:
-                continue
+        for prediction in predictions_by_cutout.get(truth_record.cutout_id, []):
             distance = angular_distance_arcsec(truth_record.ra, truth_record.dec, prediction.ra, prediction.dec)
             if distance <= radius_for(truth_record):
                 candidates.append((distance, truth_record.source_id, prediction.prediction_id))

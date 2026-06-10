@@ -852,6 +852,7 @@ def _sweep_thresholds_payload(
     rows = []
     best_threshold = 0.0
     best_metrics = {"tp": 0.0, "fp": 0.0, "fn": float(len(truth)), "precision": 0.0, "recall": 0.0, "f1": 0.0}
+    points: list[tuple[float, float]] = []
     for threshold in thresholds:
         filtered = _filter_predictions_by_score(predictions, threshold)
         matches = _match_catalogs_for_options(
@@ -863,6 +864,7 @@ def _sweep_thresholds_payload(
         )
         metrics = detection_metrics(matches)
         rows.append({"threshold": threshold, **metrics})
+        points.append((metrics["recall"], metrics["precision"]))
         if metrics["f1"] > best_metrics["f1"]:
             best_threshold = threshold
             best_metrics = metrics
@@ -881,15 +883,33 @@ def _sweep_thresholds_payload(
         },
         "best_threshold": best_threshold,
         "best_metrics": best_metrics,
-        "average_precision": _detection_average_precision_for_options(
-            truth,
-            predictions,
-            radius_arcsec=radius_arcsec,
-            seeing_aware=seeing_aware,
-            psf_fraction=psf_fraction,
-        ),
+        "average_precision": _average_precision_from_points(points, best_metrics["f1"], len(thresholds)),
         "thresholds": rows,
     }
+
+
+def _average_precision_from_points(
+    points: Sequence[tuple[float, float]],
+    best_f1: float,
+    n_thresholds: int,
+) -> dict[str, float]:
+    precision_by_recall: dict[float, float] = {}
+    for recall, precision in points:
+        precision_by_recall[recall] = max(precision_by_recall.get(recall, 0.0), precision)
+
+    envelope = 0.0
+    envelope_by_recall: dict[float, float] = {}
+    for recall in sorted(precision_by_recall, reverse=True):
+        envelope = max(envelope, precision_by_recall[recall])
+        envelope_by_recall[recall] = envelope
+
+    ap = 0.0
+    previous_recall = 0.0
+    for recall in sorted(envelope_by_recall):
+        ap += max(0.0, recall - previous_recall) * envelope_by_recall[recall]
+        previous_recall = max(previous_recall, recall)
+
+    return {"ap": ap, "best_f1": best_f1, "n_thresholds": float(n_thresholds)}
 
 
 def _detection_average_precision_for_options(
