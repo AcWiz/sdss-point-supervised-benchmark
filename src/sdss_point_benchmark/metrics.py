@@ -39,16 +39,19 @@ def detection_score_curve(
     *,
     max_radius_arcsec: float,
     psf_fraction: float | None = None,
+    max_thresholds: int | None = 512,
 ) -> dict[str, object]:
     """Compute thresholded detection metrics while reusing candidate distances."""
 
-    thresholds = sorted({prediction.score for prediction in predictions}, reverse=True)
-    if not thresholds:
+    candidate_thresholds = sorted({prediction.score for prediction in predictions}, reverse=True)
+    thresholds = select_score_thresholds(candidate_thresholds, max_thresholds=max_thresholds)
+    if not candidate_thresholds:
         empty = {"ap": 0.0, "best_f1": 0.0, "n_thresholds": 0.0}
         return {
             "best_threshold": 0.0,
             "best_metrics": {"tp": 0.0, "fp": 0.0, "fn": float(len(truth)), "precision": 0.0, "recall": 0.0, "f1": 0.0},
             "average_precision": empty,
+            "candidate_thresholds": 0,
             "thresholds": [],
         }
 
@@ -80,8 +83,21 @@ def detection_score_curve(
         "best_threshold": best_threshold,
         "best_metrics": best_metrics,
         "average_precision": average_precision_from_points(points, best_metrics["f1"], len(thresholds)),
+        "candidate_thresholds": len(candidate_thresholds),
         "thresholds": rows,
     }
+
+
+def select_score_thresholds(thresholds: Sequence[float], *, max_thresholds: int | None) -> list[float]:
+    if max_thresholds is None or max_thresholds <= 0 or len(thresholds) <= max_thresholds:
+        return list(thresholds)
+    if max_thresholds == 1:
+        return [thresholds[0]]
+    selected = {
+        thresholds[round(index * (len(thresholds) - 1) / (max_thresholds - 1))]
+        for index in range(max_thresholds)
+    }
+    return sorted(selected, reverse=True)
 
 
 def build_candidate_edges(

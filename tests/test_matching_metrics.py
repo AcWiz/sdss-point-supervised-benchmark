@@ -8,6 +8,7 @@ from sdss_point_benchmark.metrics import (
     detection_metrics,
     detection_score_curve,
     photometry_metrics,
+    select_score_thresholds,
 )
 from sdss_point_benchmark.schema import PredictionRecord, SourceRecord
 
@@ -117,6 +118,29 @@ class MatchingMetricTests(unittest.TestCase):
         self.assertEqual(curve["average_precision"]["n_thresholds"], 3.0)
         self.assertEqual(curve["best_metrics"]["tp"], 2.0)
         self.assertEqual(curve["best_metrics"]["fn"], 1.0)
+
+    def test_select_score_thresholds_caps_dense_sweeps(self):
+        thresholds = [float(score) for score in range(100, 0, -1)]
+
+        selected = select_score_thresholds(thresholds, max_thresholds=5)
+
+        self.assertEqual(len(selected), 5)
+        self.assertEqual(selected[0], thresholds[0])
+        self.assertEqual(selected[-1], thresholds[-1])
+        self.assertEqual(selected, sorted(selected, reverse=True))
+
+    def test_detection_score_curve_reports_candidate_threshold_count(self):
+        truth = [SourceRecord("t1", "c1", 10.0, 0.0, "star")]
+        predictions = [
+            PredictionRecord(f"p{idx}", "c1", 10.0, 0.0, "star", score=float(idx))
+            for idx in range(10)
+        ]
+
+        curve = detection_score_curve(truth, predictions, max_radius_arcsec=1.0, max_thresholds=3)
+
+        self.assertEqual(curve["candidate_thresholds"], 10)
+        self.assertEqual(len(curve["thresholds"]), 3)
+        self.assertEqual(curve["average_precision"]["n_thresholds"], 3.0)
 
 
 if __name__ == "__main__":

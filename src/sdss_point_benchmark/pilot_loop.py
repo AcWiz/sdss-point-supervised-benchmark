@@ -354,6 +354,7 @@ def sweep_thresholds_payload(
         "counts": {
             "truth": len(truth),
             "candidate_predictions": len(predictions),
+            "candidate_thresholds": curve["candidate_thresholds"],
             "n_thresholds": len(curve["thresholds"]),
         },
         "best_threshold": curve["best_threshold"],
