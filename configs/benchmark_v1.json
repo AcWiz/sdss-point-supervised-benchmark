@@ -1,0 +1,42 @@
+{
+  "protocol": "sdss-point-supervised-v1",
+  "bands": ["u", "g", "r", "i", "z"],
+  "classes": ["star", "galaxy"],
+  "optional_classes": ["quasar"],
+  "cutout": {
+    "size_pixels": 128,
+    "pixel_scale_arcsec": 0.396
+  },
+  "split": {
+    "train_fraction": 0.7,
+    "val_fraction": 0.15,
+    "test_fraction": 0.15,
+    "ra_bin_deg": 1.0,
+    "dec_bin_deg": 1.0,
+    "seed": 42
+  },
+  "matching": {
+    "radius_arcsec": 1.0,
+    "seeing_aware": true,
+    "psf_fraction": 0.5
+  },
+  "strata": {
+    "mag_r_bins": [14, 16, 18, 20, 21, 22, 23],
+    "snr_bins": [0, 5, 10, 20, 50, 100],
+    "nearest_neighbor_arcsec_bins": [0, 1, 2, 4, 8, 16],
+    "seeing_arcsec_bins": [0, 1.2, 1.6, 2.0, 3.0]
+  },
+  "baseline": {
+    "model": "AstronomyAwareBaseline",
+    "in_channels": 5,
+    "num_classes": 2,
+    "center_loss": "binary_cross_entropy_with_logits",
+    "class_loss": "cross_entropy_at_labeled_points",
+    "photometry_loss": "inverse_variance_weighted_l2",
+    "valid_mask": "ignore_unlabeled_or_incomplete_regions",
+    "psf_reconstruction_loss": "psf_convolved_l2",
+    "multiband_consistency_weight": 0.05,
+    "psf_reconstruction_weight": 0.2,
+    "class_weight": 0.5
+  }
+}

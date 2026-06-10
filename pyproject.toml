@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdss-point-benchmark"
+version = "0.1.0"
+description = "Point-supervised SDSS source catalog generation benchmark protocol and baseline."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.23"]
+authors = [{ name = "SDSS Point-Supervised Benchmark Authors" }]
+license = { text = "MIT" }
+keywords = ["astronomy", "sdss", "weak-supervision", "source-detection", "pytorch"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Astronomy",
+]
+
+[project.optional-dependencies]
+baseline = ["torch>=2.0", "astropy>=5.0"]
+fits = ["astropy>=5.0"]
+dataset = ["astropy>=5.0", "pandas>=2.0", "tqdm>=4.0"]
+test = ["torch>=2.0", "astropy>=5.0"]
+dev = ["ruff>=0.4", "pytest>=8.0", "torch>=2.0", "astropy>=5.0", "pandas>=2.0", "tqdm>=4.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sdss_point_benchmark = ["py.typed"]
+
+[project.scripts]
+sdss-point-benchmark = "sdss_point_benchmark.cli:main"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

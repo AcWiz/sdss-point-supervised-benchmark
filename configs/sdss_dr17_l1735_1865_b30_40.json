@@ -1,0 +1,57 @@
+{
+  "protocol": "sdss-point-supervised-v1",
+  "data": {
+    "name": "sdss_dr17_l1735_1865_b30_40",
+    "root": "/Data/sdss/sdss_dr17_l1735_1865_b30_40",
+    "release": "SDSS DR17",
+    "region": {
+      "galactic_l_min": 173.5,
+      "galactic_l_max": 186.5,
+      "galactic_b_min": 30.0,
+      "galactic_b_max": 40.0
+    },
+    "native_frame_policy": "use native SDSS corrected-frame pixel grids; do not WCS-reproject for headline results",
+    "bands": ["u", "g", "r", "i", "z"],
+    "frame_manifest": "manifest_frames.csv",
+    "catalog_manifest": "manifest_catalogs.csv"
+  },
+  "cutout": {
+    "size_pixels": 128,
+    "pixel_scale_arcsec": 0.396,
+    "center_source_policy": "catalog point centered when possible; skip sources too close to frame edge for v1 training"
+  },
+  "split": {
+    "train_fraction": 0.7,
+    "val_fraction": 0.15,
+    "test_fraction": 0.15,
+    "ra_bin_deg": 1.0,
+    "dec_bin_deg": 1.0,
+    "seed": 42
+  },
+  "method": {
+    "name": "psf-constrained-point-supervised-cataloger",
+    "backbone": "AstronomyAwareBaseline",
+    "losses": {
+      "center": "binary_cross_entropy_with_logits",
+      "classification": "cross_entropy_at_labeled_points",
+      "photometry": "inverse_variance_weighted_l2",
+      "multiband_consistency_weight": 0.05,
+      "psf_reconstruction_weight": 0.2,
+      "valid_mask": "ignore unlabeled or invalid image regions"
+    },
+    "decode": {
+      "threshold": 0.5,
+      "nms_radius_pixels": 2
+    }
+  },
+  "experiments": [
+    {"id": "E0", "name": "Data Integrity"},
+    {"id": "E1", "name": "Benchmark Contract"},
+    {"id": "E2", "name": "Classical and Existing Baselines"},
+    {"id": "E3", "name": "PSF-Constrained Method"},
+    {"id": "E4", "name": "Stratified Stress Tests"},
+    {"id": "E5", "name": "Synthetic Injection"},
+    {"id": "E6", "name": "Ablations"},
+    {"id": "E7", "name": "Efficiency"}
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "protocol": "sdss-point-supervised-v1",
+  "program_id": "sdss_point_catalog_v1",
+  "objective": "Build auditable evidence for the SDSS point-supervised catalog-generation benchmark and method paper.",
+  "config": "configs/sdss_dr17_l1735_1865_b30_40.json",
+  "dataset": "artifacts/datasets/sdss_dr17_l1735_1865_b30_40_smoke5",
+  "split": "artifacts/splits/sdss_dr17_l1735_1865_b30_40_smoke5_seed42_skybin_v1.json",
+  "report_root": "reports/research_runs",
+  "checkpoint_root": "artifacts/checkpoints/research_runs",
+  "defaults": {
+    "epochs": 1,
+    "batch_size": 16,
+    "learning_rate": 0.001,
+    "base_channels": 8,
+    "device": "cpu",
+    "seed": 42,
+    "candidate_threshold": 0.95,
+    "nms_radius": 2,
+    "max_detections_per_cutout": 16,
+    "predict_limit": 64,
+    "radius_arcsec": 1.0,
+    "seeing_aware": true
+  },
+  "claim_gates": {
+    "min_epochs": 5,
+    "required_tags": ["fixed_split", "native_frame"]
+  },
+  "variants": [
+    {
+      "variant_id": "smoke_psf_proxy",
+      "objective": "Audit the smoke-scale PSF-constrained baseline loop.",
+      "hypothesis": "The current PSF-constrained baseline can produce measurable validation/test evidence under the fixed smoke split.",
+      "tags": ["smoke", "fixed_split", "native_frame", "psf_proxy"],
+      "claims": ["benchmark_contract", "psf_constrained_method"],
+      "run": {}
+    },
+    {
+      "variant_id": "smoke_low_threshold",
+      "objective": "Check whether the smoke run is threshold-limited.",
+      "hypothesis": "Lowering the candidate threshold should expose whether zero recall is caused by candidate filtering or coordinate alignment.",
+      "tags": ["smoke", "fixed_split", "native_frame", "diagnostic"],
+      "claims": ["threshold_policy"],
+      "run": {
+        "candidate_threshold": 0.2
+      }
+    },
+    {
+      "variant_id": "pilot_paper_scale",
+      "objective": "Run the first pilot-scale candidate evidence check.",
+      "hypothesis": "The fixed 100-field pilot split should provide non-smoke evidence for detection AP and stratified recall.",
+      "tags": ["pilot", "fixed_split", "native_frame", "paper_scale_candidate"],
+      "claims": ["benchmark_contract", "psf_constrained_method", "stratified_metrics"],
+      "run": {
+        "dataset": "artifacts/datasets/sdss_dr17_l1735_1865_b30_40_pilot",
+        "split": "artifacts/splits/sdss_dr17_l1735_1865_b30_40_pilot100_seed42_skybin_v1.json",
+        "epochs": 50,
+        "batch_size": 32,
+        "base_channels": 32,
+        "candidate_threshold": 0.2,
+        "predict_limit": null
+      }
+    }
+  ]
+}

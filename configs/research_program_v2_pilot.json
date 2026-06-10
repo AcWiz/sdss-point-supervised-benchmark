@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "protocol": "sdss-point-supervised-v1",
+  "program_id": "sdss_point_catalog_v2_pilot",
+  "objective": "Build pilot-scale evidence for the SDSS point-supervised catalog-generation benchmark and compare a lightweight UNet against the compact baseline.",
+  "config": "configs/sdss_dr17_l1735_1865_b30_40.json",
+  "dataset": "artifacts/datasets/sdss_dr17_l1735_1865_b30_40_pilot",
+  "split": "artifacts/splits/sdss_dr17_l1735_1865_b30_40_pilot100_seed42_skybin_v1.json",
+  "report_root": "reports/research_runs",
+  "checkpoint_root": "artifacts/checkpoints/research_runs",
+  "defaults": {
+    "epochs": 5,
+    "batch_size": 32,
+    "learning_rate": 0.001,
+    "base_channels": 32,
+    "model_arch": "baseline",
+    "loader_mode": "shard_grouped",
+    "shard_cache_size": 1,
+    "num_workers": 2,
+    "pin_memory": "auto",
+    "device": "cuda:0",
+    "seed": 42,
+    "candidate_threshold": 0.2,
+    "nms_radius": 2,
+    "max_detections_per_cutout": 16,
+    "predict_limit": null,
+    "radius_arcsec": 1.0,
+    "seeing_aware": true
+  },
+  "claim_gates": {
+    "min_epochs": 5,
+    "required_tags": ["fixed_split", "native_frame"]
+  },
+  "variants": [
+    {
+      "variant_id": "loader_probe_2048_e1",
+      "objective": "Validate shard-aware data loading throughput before full pilot runs.",
+      "hypothesis": "Grouped shard loading with a one-shard cache should produce a checkpoint and measurable throughput on the fixed pilot split.",
+      "tags": ["pilot", "fixed_split", "native_frame", "loader_probe"],
+      "claims": ["engineering_throughput"],
+      "run": {
+        "epochs": 1,
+        "train_limit_samples": 2048,
+        "predict_limit": 512,
+        "base_channels": 16,
+        "model_arch": "baseline"
+      }
+    },
+    {
+      "variant_id": "pilot100_baseline_e5",
+      "depends_on": ["loader_probe_2048_e1"],
+      "objective": "Establish the first non-limited baseline pilot evidence point.",
+      "hypothesis": "The compact baseline should produce nonzero AP and recall on the fixed 100-field pilot split after 5 epochs.",
+      "tags": ["pilot", "fixed_split", "native_frame", "baseline"],
+      "claims": ["benchmark_contract", "psf_constrained_method"],
+      "run": {
+        "epochs": 5,
+        "model_arch": "baseline"
+      }
+    },
+    {
+      "variant_id": "pilot100_unet_lite_e5",
+      "depends_on": ["loader_probe_2048_e1"],
+      "objective": "Compare lightweight multiscale features against the compact baseline on pilot evidence.",
+      "hypothesis": "The lightweight UNet should improve AP or recall over the compact baseline under the same fixed split and training budget.",
+      "tags": ["pilot", "fixed_split", "native_frame", "unet_lite"],
+      "claims": ["architecture_improvement"],
+      "run": {
+        "epochs": 5,
+        "model_arch": "unet_lite"
+      }
+    },
+    {
+      "variant_id": "pilot100_baseline_e50",
+      "depends_on": ["pilot100_baseline_e5"],
+      "objective": "Run paper-scale baseline pilot training for stable comparison.",
+      "hypothesis": "The compact baseline should provide a stable 50-epoch pilot reference under the fixed split.",
+      "tags": ["pilot", "fixed_split", "native_frame", "baseline", "paper_scale_candidate"],
+      "claims": ["benchmark_contract", "psf_constrained_method", "stratified_metrics"],
+      "run": {
+        "epochs": 50,
+        "model_arch": "baseline"
+      }
+    },
+    {
+      "variant_id": "pilot100_unet_lite_e50",
+      "depends_on": ["pilot100_unet_lite_e5"],
+      "objective": "Run paper-scale lightweight UNet pilot training for architecture evidence.",
+      "hypothesis": "The lightweight UNet should produce stronger 50-epoch pilot AP or recall than the compact baseline.",
+      "tags": ["pilot", "fixed_split", "native_frame", "unet_lite", "paper_scale_candidate"],
+      "claims": ["architecture_improvement", "stratified_metrics"],
+      "run": {
+        "epochs": 50,
+        "model_arch": "unet_lite"
+      }
+    }
+  ]
+}
