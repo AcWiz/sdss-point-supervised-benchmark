@@ -1,0 +1,26 @@
+name: Experiment
+description: Track an automated research run or ablation.
+title: "[Experiment]: "
+labels: ["experiment"]
+body:
+  - type: input
+    id: program
+    attributes:
+      label: Research Program
+      placeholder: configs/research_program_v2_pilot.json
+  - type: input
+    id: run
+    attributes:
+      label: Run ID or Variant
+      placeholder: pilot100_unet_lite_e5
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Metrics, claim gate, and artifact expectations.

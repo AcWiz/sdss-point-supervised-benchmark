@@ -1,0 +1,24 @@
+name: Feature Request
+description: Propose a benchmark, modeling, metric, or automation improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: What research or engineering problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the intended behavior or interface.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: What tests, metrics, or experiment evidence should prove it works?

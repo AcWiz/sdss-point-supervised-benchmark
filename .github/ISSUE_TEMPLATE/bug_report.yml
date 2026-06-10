@@ -1,0 +1,32 @@
+name: Bug Report
+description: Report a reproducible defect in the benchmark, training, or automation code.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Include commands, config paths, and relevant run IDs.
+      placeholder: |
+        make test
+        PYTHONPATH=src python -m sdss_point_benchmark.cli ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Python, OS, torch/CUDA versions, and hardware if relevant.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or Artifacts
+      description: Paste short logs only. Do not attach raw survey data.
