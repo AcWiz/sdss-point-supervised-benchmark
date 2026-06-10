@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import unittest
 import csv
 import json
 import tempfile
+import unittest
 from pathlib import Path
 
 from PIL import Image
@@ -11,12 +11,11 @@ from reports.full_frame_stitch_demo.stitch_smoke5_full_frame import (
     FULL_OVERLAY_HEADER_HEIGHT,
     TilePrediction,
     TruthPoint,
+    _render_full_overlay,
     generate_tile_grid,
     restore_global_predictions,
     suppress_overlapping_predictions,
-    _render_full_overlay,
 )
-
 
 REPORT_DIR = Path("reports/full_frame_stitch_demo")
 SUMMARY_JSON = REPORT_DIR / "summary.json"

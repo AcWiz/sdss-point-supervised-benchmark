@@ -5,7 +5,6 @@ from pathlib import Path
 
 from PIL import Image
 
-
 REPORT_DIR = Path("reports/gt_visualizations/pilot")
 DATASET_DIR = Path("artifacts/datasets/sdss_dr17_l1735_1865_b30_40_pilot")
 INDEX_CSV = REPORT_DIR / "index.csv"

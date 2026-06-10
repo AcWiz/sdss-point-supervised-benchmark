@@ -35,6 +35,8 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(payload["status"], "planned")
         self.assertEqual(written["runs"][0]["run_id"], "dry_baseline")
         self.assertTrue(written["runs"][0]["dry_run"])
+        self.assertEqual(written["runs"][0]["claims"], ["scheduler"])
+        self.assertEqual(written["runs"][0]["existing_status"]["status"], "absent")
 
     def test_dependency_map_resolves_variant_ids_to_prefixed_run_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,23 +66,84 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("baseline", command)
         self.assertIn("--tag", command)
         self.assertIn("fixed_split", command)
+        self.assertIn("--claim", command)
+        self.assertIn("scheduler", command)
+        self.assertIn("--claim-gate-policy-json", command)
 
     def test_wait_for_available_gpu_requires_two_available_samples(self):
         busy = [GpuSnapshot(index=0, name="GPU", memory_total_mb=24576, memory_used_mb=20000, utilization_gpu=0)]
         free = [GpuSnapshot(index=0, name="GPU", memory_total_mb=24576, memory_used_mb=1024, utilization_gpu=0)]
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch("sdss_point_benchmark.autopilot.query_gpus", side_effect=[busy, busy, busy, free, free]):
-                with patch("sdss_point_benchmark.autopilot.time.sleep", return_value=None):
-                    gpu = wait_for_available_gpu(
-                        max_util=20,
-                        min_free_gb=10,
-                        poll_seconds=0,
-                        sample_seconds=0,
-                        gpu_snapshot_path=Path(tmp) / "gpu.jsonl",
-                    )
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("sdss_point_benchmark.autopilot.query_gpus", side_effect=[busy, busy, busy, free, free]),
+            patch("sdss_point_benchmark.autopilot.time.sleep", return_value=None),
+        ):
+            gpu = wait_for_available_gpu(
+                max_util=20,
+                min_free_gb=10,
+                poll_seconds=0,
+                sample_seconds=0,
+                gpu_snapshot_path=Path(tmp) / "gpu.jsonl",
+            )
 
         self.assertIsNotNone(gpu)
         self.assertEqual(gpu.index, 0)
+
+    def test_autopilot_execute_skips_existing_matching_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_dir = _write_tiny_dataset(root / "dataset")
+            config = _write_config(root)
+            program = _write_program(root, config, dataset_dir)
+            report_dir = root / "reports" / "research_runs" / "queue_baseline"
+            report_dir.mkdir(parents=True)
+            (report_dir / "report.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "queue_baseline",
+                        "status": "executed",
+                        "claim_gate": {"status": "engineering_check"},
+                        "metrics": {"test": {"counts": {}, "detection": {}}},
+                        "claims": ["scheduler"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch("sdss_point_benchmark.autopilot.start_research_run_process") as start:
+                payload = run_research_autopilot(
+                    program_path=program,
+                    output_dir=root / "scheduler",
+                    options=AutopilotOptions(run_prefix="queue", execute=True, poll_seconds=0, sample_seconds=0),
+                )
+
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["completed"], ["queue_baseline"])
+        self.assertEqual(payload["skipped"][0]["run_id"], "queue_baseline")
+        start.assert_not_called()
+
+    def test_autopilot_execute_blocks_nonempty_incomplete_report_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_dir = _write_tiny_dataset(root / "dataset")
+            config = _write_config(root)
+            program = _write_program(root, config, dataset_dir)
+            report_dir = root / "reports" / "research_runs" / "queue_baseline"
+            report_dir.mkdir(parents=True)
+            (report_dir / "partial.txt").write_text("partial\n", encoding="utf-8")
+
+            with patch("sdss_point_benchmark.autopilot.start_research_run_process") as start:
+                payload = run_research_autopilot(
+                    program_path=program,
+                    output_dir=root / "scheduler",
+                    options=AutopilotOptions(run_prefix="queue", execute=True, poll_seconds=0, sample_seconds=0),
+                )
+
+        self.assertEqual(payload["status"], "completed_with_failures")
+        self.assertEqual(payload["blocked"][0]["run_id"], "queue_baseline")
+        self.assertIn("report.json is missing", payload["blocked"][0]["error"])
+        start.assert_not_called()
 
 
 def _write_config(root: Path) -> Path:
@@ -133,6 +196,7 @@ def _write_program(root: Path, config: Path, dataset_dir: Path, include_dependen
                 "split": str(root / "split.json"),
                 "report_root": str(root / "reports" / "research_runs"),
                 "checkpoint_root": str(root / "checkpoints" / "research_runs"),
+                "claim_gates": {"min_epochs": 5, "required_tags": ["fixed_split"]},
                 "defaults": {
                     "epochs": 1,
                     "batch_size": 1,

@@ -239,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     research_run_parser.add_argument("--variant-id", help=argparse.SUPPRESS)
     research_run_parser.add_argument("--parent-run-id", help=argparse.SUPPRESS)
     research_run_parser.add_argument("--tag", action="append", dest="tags", help=argparse.SUPPRESS)
+    research_run_parser.add_argument("--claim", action="append", dest="claims", help=argparse.SUPPRESS)
+    research_run_parser.add_argument("--claim-gate-policy-json", help=argparse.SUPPRESS)
 
     research_report_parser = subparsers.add_parser(
         "research-report",
@@ -632,6 +634,8 @@ def _research_run_command(args: argparse.Namespace) -> int:
             variant_id=args.variant_id,
             parent_run_id=args.parent_run_id,
             tags=tuple(args.tags or ()),
+            claims=tuple(args.claims or ()),
+            claim_gate_policy=json.loads(args.claim_gate_policy_json) if args.claim_gate_policy_json else None,
         )
     )
     append_registry_entry(Path(args.report_dir).parent / "index.jsonl", report)
@@ -655,7 +659,12 @@ def _research_report_command(args: argparse.Namespace) -> int:
 
 def _research_program_command(args: argparse.Namespace) -> int:
     from .automation import run_research_run
-    from .research_program import append_registry_entry, expand_research_program, load_research_program, write_program_plan
+    from .research_program import (
+        append_registry_entry,
+        expand_research_program,
+        load_research_program,
+        write_program_plan,
+    )
 
     if not args.execute:
         write_program_plan(args.program, output_dir=args.output_dir, run_prefix=args.run_prefix, dry_run=True)

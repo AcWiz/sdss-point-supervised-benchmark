@@ -127,6 +127,8 @@ def expand_research_program(
                 variant_id=variant.variant_id,
                 parent_run_id=optional_str(merged.pop("parent_run_id", None)),
                 tags=variant.tags,
+                claims=variant.claims,
+                claim_gate_policy=program.claim_gates,
             )
         )
     return specs
@@ -154,6 +156,8 @@ def write_program_plan(
                 "objective": spec.objective,
                 "hypothesis": spec.hypothesis,
                 "tags": list(spec.tags),
+                "claims": list(spec.claims),
+                "claim_gate_policy": dict(spec.claim_gate_policy or {}),
                 "depends_on": list(variant.depends_on),
                 "spec": stringify_paths(build_plan_payload(spec, {"status": "not_run"}).get("spec", {})),
             }
@@ -229,6 +233,7 @@ def build_registry_entry(report: dict[str, Any]) -> dict[str, Any]:
         "objective": report.get("objective", ""),
         "hypothesis": report.get("hypothesis", ""),
         "tags": list(report.get("tags", [])),
+        "claims": list(report.get("claims", [])),
         "report_path": report.get("_report_path", ""),
         "run_dir": report.get("_run_dir", ""),
         "metrics": {
@@ -302,10 +307,15 @@ def build_diagnosis(report_path: str | Path) -> dict[str, Any]:
     validation = metrics.get("validation", {}) if isinstance(metrics, dict) else {}
     reasons = []
     checks = []
+    claim_gate = report.get("claim_gate", {}) if isinstance(report.get("claim_gate", {}), dict) else {}
     recall = float(detection.get("recall", 0.0) or 0.0)
     precision = float(detection.get("precision", 0.0) or 0.0)
     candidates = int(counts.get("candidate_predictions", 0) or 0)
     truth = int(counts.get("truth", 0) or 0)
+    gate_reasons = [str(reason) for reason in claim_gate.get("reasons", [])]
+    for reason in gate_reasons:
+        if reason not in reasons:
+            reasons.append(reason)
     if truth <= 0:
         reasons.append("test truth catalog is empty")
         checks.append("Verify split selection and truth filtering policy.")
@@ -319,17 +329,22 @@ def build_diagnosis(report_path: str | Path) -> dict[str, Any]:
     if precision < 0.2 and candidates > 0:
         reasons.append("low precision")
         checks.append("Sweep candidate threshold and NMS radius on validation before another test read.")
-    if validation.get("best_threshold") in {None, 0, 0.0}:
+    if validation.get("best_threshold") in {None, 0}:
         reasons.append("validation threshold selection is weak or unavailable")
         checks.append("Inspect validation threshold sweep for degenerate score ordering.")
+    for item in report.get("next_actions", []):
+        action = str(item.get("action", "")).strip() if isinstance(item, dict) else ""
+        if action and action not in checks:
+            checks.append(action)
+    gate_status = str(claim_gate.get("status") or "")
     return {
         "schema_version": REGISTRY_SCHEMA_VERSION,
         "run_id": report.get("run_id", ""),
         "report": str(report_path),
-        "status": "needs_attention" if reasons else "no_obvious_issue",
+        "status": "needs_attention" if reasons or gate_status in {"blocked", "engineering_check"} else "no_obvious_issue",
         "reasons": reasons,
         "recommended_checks": checks,
-        "claim_gate": report.get("claim_gate", {}),
+        "claim_gate": claim_gate,
         "metrics": {"counts": counts, "detection": detection, "validation": validation},
     }
 
@@ -338,13 +353,13 @@ def build_evidence_ledger(root: str | Path, *, output_path: str | Path | None = 
     reports = load_run_reports(root)
     claims: dict[str, dict[str, Any]] = {}
     for report in reports:
-        tags = list(report.get("tags") or [])
-        if not tags:
-            tags = ["uncategorized"]
+        claim_names = list(report.get("claims") or report.get("tags") or [])
+        if not claim_names:
+            claim_names = ["uncategorized"]
         gate = str(report.get("claim_gate", {}).get("status") or "unknown")
         entry = build_registry_entry(report)
-        for tag in tags:
-            bucket = claims.setdefault(tag, {"supporting_runs": [], "engineering_runs": [], "blocked_runs": []})
+        for claim in claim_names:
+            bucket = claims.setdefault(str(claim), {"supporting_runs": [], "engineering_runs": [], "blocked_runs": []})
             if gate == "candidate_evidence":
                 bucket["supporting_runs"].append(entry)
             elif gate == "engineering_check":
@@ -394,7 +409,15 @@ def render_compare_markdown(compare: dict[str, Any]) -> str:
 
 
 def render_diagnosis_markdown(diagnosis: dict[str, Any]) -> str:
-    lines = ["# Research Diagnosis", "", f"- Run: {diagnosis.get('run_id', '')}", f"- Status: {diagnosis.get('status', '')}", ""]
+    gate = diagnosis.get("claim_gate", {}) if isinstance(diagnosis.get("claim_gate", {}), dict) else {}
+    lines = [
+        "# Research Diagnosis",
+        "",
+        f"- Run: {diagnosis.get('run_id', '')}",
+        f"- Status: {diagnosis.get('status', '')}",
+        f"- Claim gate: {gate.get('status', '')}",
+        "",
+    ]
     lines.append("## Reasons")
     lines.append("")
     for reason in diagnosis.get("reasons", []):

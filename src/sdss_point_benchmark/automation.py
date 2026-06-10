@@ -56,6 +56,8 @@ class ResearchRunSpec:
     variant_id: str | None = None
     parent_run_id: str | None = None
     tags: tuple[str, ...] = ()
+    claims: tuple[str, ...] = ()
+    claim_gate_policy: dict[str, Any] | None = None
 
 
 def run_research_run(spec: ResearchRunSpec) -> dict[str, Any]:
@@ -320,6 +322,8 @@ def build_research_report(
         "variant_id": spec.variant_id,
         "parent_run_id": spec.parent_run_id,
         "tags": list(spec.tags),
+        "claims": list(spec.claims),
+        "claim_gate_policy": dict(spec.claim_gate_policy or {}),
         "inputs": {
             "config": str(spec.config),
             "dataset": str(spec.dataset),
@@ -440,8 +444,14 @@ def evaluate_claim_gate(
         engineering_reasons.append("predict_limit was set")
     if spec.train_limit_samples is not None:
         engineering_reasons.append("train_limit_samples was set")
-    if spec.epochs < 5:
-        engineering_reasons.append("epochs below paper-scale default")
+    policy = spec.claim_gate_policy or {}
+    min_epochs = int(policy.get("min_epochs", 5))
+    if spec.epochs < min_epochs:
+        engineering_reasons.append(f"epochs below policy minimum {min_epochs}")
+    required_tags = set(str(tag) for tag in policy.get("required_tags", []))
+    missing_tags = sorted(required_tags - set(spec.tags))
+    if missing_tags:
+        engineering_reasons.append(f"missing required tags: {missing_tags}")
     if engineering_reasons:
         return {
             "status": "engineering_check",
@@ -534,6 +544,7 @@ def build_run_manifest(run_root: Path, report: Mapping[str, Any]) -> dict[str, A
         "run_id": report.get("run_id", ""),
         "program_id": report.get("program_id"),
         "variant_id": report.get("variant_id"),
+        "claims": list(report.get("claims", [])),
         "run_dir": str(run_root),
         "status": report.get("status", ""),
         "claim_gate": report.get("claim_gate", {}).get("status", ""),
@@ -547,6 +558,7 @@ def build_run_state(report: Mapping[str, Any]) -> dict[str, Any]:
         "run_id": report.get("run_id", ""),
         "status": report.get("status", ""),
         "claim_gate": report.get("claim_gate", {}),
+        "claims": list(report.get("claims", [])),
         "metrics_status": report.get("metrics", {}).get("status", "unknown"),
         "next_actions": report.get("next_actions", []),
     }
@@ -565,6 +577,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         f"- Hypothesis: {report.get('hypothesis', '')}",
         f"- Claim gate: {claim_gate.get('status', '')}",
         f"- Paper ready: {claim_gate.get('paper_ready', False)}",
+        f"- Claims: {', '.join(str(claim) for claim in report.get('claims', [])) or 'n/a'}",
         "",
         "## Test Detection",
         "",

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .experiment import PROTOCOL
-from .pilot_loop import write_json
+from .pilot_loop import load_json, write_json
 from .research_program import (
     build_diagnosis,
     build_evidence_ledger,
@@ -62,6 +62,7 @@ def run_research_autopilot(
     program = load_research_program(program_path)
     specs = expand_research_program(program, run_prefix=options.run_prefix, dry_run=not options.execute)
     dependencies = build_dependency_map(program, options.run_prefix)
+    existing = {spec.run_id: inspect_existing_run(spec) for spec in specs}
     payload: dict[str, Any] = {
         "schema_version": 1,
         "protocol": PROTOCOL,
@@ -77,7 +78,10 @@ def run_research_autopilot(
                 "checkpoint_dir": str(spec.checkpoint_dir),
                 "device": spec.device,
                 "dry_run": spec.dry_run,
+                "claims": list(spec.claims),
+                "claim_gate_policy": dict(spec.claim_gate_policy or {}),
                 "depends_on": dependencies.get(spec.run_id, []),
+                "existing_status": existing[spec.run_id],
             }
             for spec in specs
         ],
@@ -91,10 +95,31 @@ def run_research_autopilot(
     completed: list[str] = []
     failed: list[dict[str, str]] = []
     blocked: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
     pending = {spec.run_id: spec for spec in specs}
     running: dict[str, RunningRun] = {}
     busy_gpu_indices: set[int] = set()
     deadline_seconds = max(0.0, options.max_runtime_minutes * 60.0)
+    for run_id, spec in list(pending.items()):
+        status = existing[run_id]
+        if status["status"] == "complete":
+            completed.append(run_id)
+            skipped.append({"run_id": run_id, "report": status.get("report", "")})
+            refresh_research_outputs(Path(spec.report_dir).parent, spec)
+            _append_jsonl(events_path, {"time": utc_now(), "event": "skipped_existing", "run_id": run_id, "report": status.get("report", "")})
+            del pending[run_id]
+        elif status["status"] == "blocked":
+            blocked.append({"run_id": run_id, "error": status.get("reason", "existing output blocks run")})
+            _append_jsonl(
+                events_path,
+                {
+                    "time": utc_now(),
+                    "event": "blocked_existing_output",
+                    "run_id": run_id,
+                    "reason": status.get("reason", "existing output blocks run"),
+                },
+            )
+            del pending[run_id]
     while pending or running:
         for run_id, running_run in list(running.items()):
             return_code = running_run.process.poll()
@@ -135,7 +160,7 @@ def run_research_autopilot(
             del running[run_id]
 
         failed_or_blocked = {row["run_id"] for row in failed} | {row["run_id"] for row in blocked}
-        for run_id, spec in list(pending.items()):
+        for run_id in list(pending):
             deps = dependencies.get(run_id, [])
             failed_deps = [dep for dep in deps if dep in failed_or_blocked]
             if failed_deps:
@@ -198,6 +223,7 @@ def run_research_autopilot(
         **payload,
         "status": "completed" if not failed and not blocked else "completed_with_failures",
         "completed": completed,
+        "skipped": skipped,
         "failed": failed,
         "blocked": blocked,
         "scheduler_state": str(events_path),
@@ -311,6 +337,10 @@ def start_research_run_process(spec, log_path: Path) -> subprocess.Popen:
         command.extend(["--parent-run-id", spec.parent_run_id])
     for tag in spec.tags:
         command.extend(["--tag", tag])
+    for claim in spec.claims:
+        command.extend(["--claim", claim])
+    if spec.claim_gate_policy:
+        command.extend(["--claim-gate-policy-json", json.dumps(spec.claim_gate_policy, sort_keys=True)])
     env = os.environ.copy()
     env["PYTHONPATH"] = str(Path("src")) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     log_path.write_text(json.dumps({"command": command}, sort_keys=True) + "\n", encoding="utf-8")
@@ -420,6 +450,32 @@ def refresh_research_outputs(root: Path, spec) -> None:
         diagnosis = build_diagnosis(report_path)
         write_json(Path(spec.report_dir) / "diagnosis.json", diagnosis)
         (Path(spec.report_dir) / "diagnosis.md").write_text(render_diagnosis_markdown(diagnosis), encoding="utf-8")
+
+
+def inspect_existing_run(spec) -> dict[str, str]:
+    report_dir = Path(spec.report_dir)
+    report_path = report_dir / "report.json"
+    if not report_dir.exists():
+        return {"status": "absent"}
+    if report_path.exists():
+        try:
+            report = load_json(report_path)
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "blocked", "reason": f"existing report is unreadable: {exc}", "report": str(report_path)}
+        if str(report.get("run_id", "")) != spec.run_id:
+            return {
+                "status": "blocked",
+                "reason": f"existing report run_id {report.get('run_id', '')!r} does not match {spec.run_id!r}",
+                "report": str(report_path),
+            }
+        return {
+            "status": "complete",
+            "report": str(report_path),
+            "claim_gate": str(report.get("claim_gate", {}).get("status", "")) if isinstance(report.get("claim_gate", {}), dict) else "",
+        }
+    if any(report_dir.iterdir()):
+        return {"status": "blocked", "reason": f"report_dir exists but report.json is missing: {report_dir}"}
+    return {"status": "empty"}
 
 
 def read_tail(path: Path, max_chars: int = 4000) -> str:

@@ -216,6 +216,35 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(gate["status"], "blocked")
         self.assertFalse(gate["paper_claim_allowed"])
 
+    def test_claim_gate_applies_program_policy(self):
+        gate = evaluate_claim_gate(
+            ResearchRunSpec(
+                run_id="policy",
+                objective="Audit.",
+                hypothesis="Policy should gate claims.",
+                config="config.json",
+                dataset="dataset",
+                split="split.json",
+                report_dir="reports",
+                checkpoint_dir="checkpoints",
+                epochs=10,
+                tags=("fixed_split",),
+                claim_gate_policy={"min_epochs": 20, "required_tags": ["fixed_split", "native_frame"]},
+            ),
+            pilot_outputs={"summary": {}, "val_threshold_sweep": {}, "test_metrics": {}},
+            metrics={
+                "test": {
+                    "counts": {"truth": 10, "candidate_predictions": 5},
+                    "detection": {"recall": 0.5, "precision": 0.5},
+                    "average_precision": {"ap": 0.25},
+                }
+            },
+        )
+
+        self.assertEqual(gate["status"], "engineering_check")
+        self.assertIn("epochs below policy minimum 20", gate["reasons"])
+        self.assertIn("missing required tags: ['native_frame']", gate["reasons"])
+
     def test_research_program_expands_variants(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -231,6 +260,8 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(specs[1].candidate_threshold, 0.1)
         self.assertEqual(specs[0].model_arch, "baseline")
         self.assertTrue(specs[0].dry_run)
+        self.assertEqual(specs[0].claims, ("benchmark_contract",))
+        self.assertEqual(specs[0].claim_gate_policy["required_tags"], ["fixed_split", "native_frame"])
 
     def test_cli_research_program_writes_queue_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,6 +288,8 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(plan["program_id"], "tiny_program")
         self.assertEqual(len(plan["runs"]), 2)
         self.assertEqual(plan["runs"][0]["run_id"], "dry_baseline")
+        self.assertEqual(plan["runs"][0]["claims"], ["benchmark_contract"])
+        self.assertEqual(plan["runs"][0]["claim_gate_policy"]["min_epochs"], 5)
 
     def test_registry_board_compare_and_diagnosis_from_reports(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -279,6 +312,7 @@ class AutomationTests(unittest.TestCase):
                     program_id="tiny_program",
                     variant_id="baseline",
                     tags=("smoke", "fixed_split"),
+                    claims=("benchmark_contract",),
                 )
             )
 
@@ -292,7 +326,36 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(board["claim_gate_counts"], {"blocked": 1})
         self.assertEqual(compare["runs"], 1)
         self.assertEqual(diagnosis["status"], "needs_attention")
-        self.assertIn("smoke", ledger["claims"])
+        self.assertIn("benchmark_contract", ledger["claims"])
+        self.assertIn("no executed pilot-loop metrics are available", diagnosis["reasons"])
+
+    def test_diagnosis_surfaces_engineering_gate_reasons_and_next_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": "engineering",
+                        "claim_gate": {"status": "engineering_check", "reasons": ["predict_limit was set"]},
+                        "metrics": {
+                            "validation": {"best_threshold": 0.5},
+                            "test": {
+                                "counts": {"truth": 10, "candidate_predictions": 10},
+                                "detection": {"precision": 0.5, "recall": 0.5},
+                            },
+                        },
+                        "next_actions": [{"priority": "high", "action": "Run without predict_limit."}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            diagnosis = build_diagnosis(report_path)
+
+        self.assertEqual(diagnosis["status"], "needs_attention")
+        self.assertIn("predict_limit was set", diagnosis["reasons"])
+        self.assertIn("Run without predict_limit.", diagnosis["recommended_checks"])
 
 
 def _write_config(root: Path) -> Path:
@@ -325,6 +388,7 @@ def _write_program(root: Path, config: Path, dataset_dir: Path) -> Path:
                 "split": str(root / "split.json"),
                 "report_root": str(root / "reports" / "research_runs"),
                 "checkpoint_root": str(root / "checkpoints" / "research_runs"),
+                "claim_gates": {"min_epochs": 5, "required_tags": ["fixed_split", "native_frame"]},
                 "defaults": {
                     "epochs": 1,
                     "batch_size": 1,

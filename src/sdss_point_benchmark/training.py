@@ -16,7 +16,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-from .baseline import AstronomyAwareBaseline, BaselineLoss, make_catalog_model, make_gaussian_heatmap, train_step
+from .baseline import BaselineLoss, make_catalog_model, make_gaussian_heatmap, train_step
 from .decode import decode_predictions
 from .io import write_prediction_catalog
 from .schema import BANDS, PredictionRecord
@@ -393,7 +393,15 @@ def predict_dataset(
             origin_x = [float(value) for value in batch["origin_x"].tolist()]
             origin_y = [float(value) for value in batch["origin_y"].tolist()]
 
-            def pixel_to_radec(batch_index: int, x: float, y: float) -> tuple[float, float]:
+            def pixel_to_radec(
+                batch_index: int,
+                x: float,
+                y: float,
+                *,
+                field_ids=field_ids,
+                origin_x=origin_x,
+                origin_y=origin_y,
+            ) -> tuple[float, float]:
                 wcs = field_wcs[field_ids[batch_index]]
                 world = wcs.all_pix2world([[origin_x[batch_index] + x, origin_y[batch_index] + y]], 1)
                 ra, dec = world[0]
