@@ -14,8 +14,8 @@ from .metrics import (
     astrometry_metrics,
     classification_metrics,
     deblending_metrics,
-    detection_average_precision,
     detection_metrics,
+    detection_score_curve,
     photometry_metrics,
     stratified_detection_report,
 )
@@ -337,26 +337,12 @@ def sweep_thresholds_payload(
     psf_fraction: float,
     filter_truth_to_prediction_cutouts: bool,
 ) -> dict:
-    thresholds = sorted({prediction.score for prediction in predictions}, reverse=True)
-    rows = []
-    best_threshold = 0.0
-    best_metrics = {"tp": 0.0, "fp": 0.0, "fn": float(len(truth)), "precision": 0.0, "recall": 0.0, "f1": 0.0}
-    points: list[tuple[float, float]] = []
-    for threshold in thresholds:
-        filtered = filter_predictions_by_score(predictions, threshold)
-        matches = match_catalogs_for_options(
-            truth,
-            filtered,
-            radius_arcsec=radius_arcsec,
-            seeing_aware=seeing_aware,
-            psf_fraction=psf_fraction,
-        )
-        metrics = detection_metrics(matches)
-        rows.append({"threshold": threshold, **metrics})
-        points.append((metrics["recall"], metrics["precision"]))
-        if metrics["f1"] > best_metrics["f1"]:
-            best_threshold = threshold
-            best_metrics = metrics
+    curve = detection_score_curve(
+        truth,
+        predictions,
+        max_radius_arcsec=radius_arcsec,
+        psf_fraction=psf_fraction if seeing_aware else None,
+    )
 
     return {
         "matching": {
@@ -368,37 +354,13 @@ def sweep_thresholds_payload(
         "counts": {
             "truth": len(truth),
             "candidate_predictions": len(predictions),
-            "n_thresholds": len(thresholds),
+            "n_thresholds": len(curve["thresholds"]),
         },
-        "best_threshold": best_threshold,
-        "best_metrics": best_metrics,
-        "average_precision": average_precision_from_points(points, best_metrics["f1"], len(thresholds)),
-        "thresholds": rows,
+        "best_threshold": curve["best_threshold"],
+        "best_metrics": curve["best_metrics"],
+        "average_precision": curve["average_precision"],
+        "thresholds": curve["thresholds"],
     }
-
-
-def average_precision_from_points(
-    points: Sequence[tuple[float, float]],
-    best_f1: float,
-    n_thresholds: int,
-) -> dict[str, float]:
-    precision_by_recall: dict[float, float] = {}
-    for recall, precision in points:
-        precision_by_recall[recall] = max(precision_by_recall.get(recall, 0.0), precision)
-
-    envelope = 0.0
-    envelope_by_recall: dict[float, float] = {}
-    for recall in sorted(precision_by_recall, reverse=True):
-        envelope = max(envelope, precision_by_recall[recall])
-        envelope_by_recall[recall] = envelope
-
-    ap = 0.0
-    previous_recall = 0.0
-    for recall in sorted(envelope_by_recall):
-        ap += max(0.0, recall - previous_recall) * envelope_by_recall[recall]
-        previous_recall = max(previous_recall, recall)
-
-    return {"ap": ap, "best_f1": best_f1, "n_thresholds": float(n_thresholds)}
 
 
 def write_split_truth_catalog(
@@ -481,44 +443,12 @@ def detection_average_precision_for_options(
     seeing_aware: bool,
     psf_fraction: float,
 ) -> dict[str, float]:
-    if not seeing_aware:
-        return detection_average_precision(truth, predictions, radius_arcsec=radius_arcsec)
-    thresholds = sorted({prediction.score for prediction in predictions}, reverse=True)
-    if not thresholds:
-        return {"ap": 0.0, "best_f1": 0.0, "n_thresholds": 0.0}
-
-    points: list[tuple[float, float]] = []
-    best_f1 = 0.0
-    for threshold in thresholds:
-        filtered = filter_predictions_by_score(predictions, threshold)
-        metrics = detection_metrics(
-            match_catalogs_seeing_aware(
-                truth,
-                filtered,
-                max_radius_arcsec=radius_arcsec,
-                psf_fraction=psf_fraction,
-            )
-        )
-        points.append((metrics["recall"], metrics["precision"]))
-        best_f1 = max(best_f1, metrics["f1"])
-
-    precision_by_recall: dict[float, float] = {}
-    for recall, precision in points:
-        precision_by_recall[recall] = max(precision_by_recall.get(recall, 0.0), precision)
-
-    envelope = 0.0
-    envelope_by_recall: dict[float, float] = {}
-    for recall in sorted(precision_by_recall, reverse=True):
-        envelope = max(envelope, precision_by_recall[recall])
-        envelope_by_recall[recall] = envelope
-
-    ap = 0.0
-    previous_recall = 0.0
-    for recall in sorted(envelope_by_recall):
-        ap += max(0.0, recall - previous_recall) * envelope_by_recall[recall]
-        previous_recall = max(previous_recall, recall)
-
-    return {"ap": ap, "best_f1": best_f1, "n_thresholds": float(len(thresholds))}
+    return detection_score_curve(
+        truth,
+        predictions,
+        max_radius_arcsec=radius_arcsec,
+        psf_fraction=psf_fraction if seeing_aware else None,
+    )["average_precision"]
 
 
 def match_catalogs_for_options(

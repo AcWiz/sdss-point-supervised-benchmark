@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from math import sqrt
 from statistics import mean, pstdev
 
-from .matching import MatchResult, match_catalogs
+from .matching import MatchResult, angular_distance_arcsec
 from .schema import PredictionRecord, SourceRecord
 
 
@@ -26,18 +26,118 @@ def detection_average_precision(
 ) -> dict[str, float]:
     """Compute detection AP by sweeping unique prediction score thresholds."""
 
+    return detection_score_curve(
+        truth,
+        predictions,
+        max_radius_arcsec=radius_arcsec,
+    )["average_precision"]
+
+
+def detection_score_curve(
+    truth: Sequence[SourceRecord],
+    predictions: Sequence[PredictionRecord],
+    *,
+    max_radius_arcsec: float,
+    psf_fraction: float | None = None,
+) -> dict[str, object]:
+    """Compute thresholded detection metrics while reusing candidate distances."""
+
     thresholds = sorted({prediction.score for prediction in predictions}, reverse=True)
     if not thresholds:
-        return {"ap": 0.0, "best_f1": 0.0, "n_thresholds": 0.0}
+        empty = {"ap": 0.0, "best_f1": 0.0, "n_thresholds": 0.0}
+        return {
+            "best_threshold": 0.0,
+            "best_metrics": {"tp": 0.0, "fp": 0.0, "fn": float(len(truth)), "precision": 0.0, "recall": 0.0, "f1": 0.0},
+            "average_precision": empty,
+            "thresholds": [],
+        }
 
+    candidate_edges = build_candidate_edges(
+        truth,
+        predictions,
+        max_radius_arcsec=max_radius_arcsec,
+        psf_fraction=psf_fraction,
+    )
     points: list[tuple[float, float]] = []
-    best_f1 = 0.0
+    rows: list[dict[str, float]] = []
+    best_threshold = 0.0
+    best_metrics = {"tp": 0.0, "fp": 0.0, "fn": float(len(truth)), "precision": 0.0, "recall": 0.0, "f1": 0.0}
     for threshold in thresholds:
-        filtered = [prediction for prediction in predictions if prediction.score >= threshold]
-        metrics = detection_metrics(match_catalogs(truth, filtered, radius_arcsec=radius_arcsec))
+        active_prediction_ids = {prediction.prediction_id for prediction in predictions if prediction.score >= threshold}
+        metrics = detection_metrics_from_edges(
+            candidate_edges,
+            truth_count=len(truth),
+            prediction_count=len(active_prediction_ids),
+            active_prediction_ids=active_prediction_ids,
+        )
+        rows.append({"threshold": threshold, **metrics})
         points.append((metrics["recall"], metrics["precision"]))
-        best_f1 = max(best_f1, metrics["f1"])
+        if metrics["f1"] > best_metrics["f1"]:
+            best_threshold = threshold
+            best_metrics = metrics
 
+    return {
+        "best_threshold": best_threshold,
+        "best_metrics": best_metrics,
+        "average_precision": average_precision_from_points(points, best_metrics["f1"], len(thresholds)),
+        "thresholds": rows,
+    }
+
+
+def build_candidate_edges(
+    truth: Sequence[SourceRecord],
+    predictions: Sequence[PredictionRecord],
+    *,
+    max_radius_arcsec: float,
+    psf_fraction: float | None = None,
+) -> list[tuple[float, str, str]]:
+    predictions_by_cutout: dict[str, list[PredictionRecord]] = defaultdict(list)
+    for prediction in predictions:
+        predictions_by_cutout[prediction.cutout_id].append(prediction)
+
+    edges: list[tuple[float, str, str]] = []
+    for truth_record in truth:
+        radius_arcsec = max_radius_arcsec
+        if psf_fraction is not None and truth_record.psf_fwhm is not None:
+            radius_arcsec = min(max_radius_arcsec, psf_fraction * truth_record.psf_fwhm)
+        for prediction in predictions_by_cutout.get(truth_record.cutout_id, []):
+            distance = angular_distance_arcsec(truth_record.ra, truth_record.dec, prediction.ra, prediction.dec)
+            if distance <= radius_arcsec:
+                edges.append((distance, truth_record.source_id, prediction.prediction_id))
+    return sorted(edges)
+
+
+def detection_metrics_from_edges(
+    candidate_edges: Sequence[tuple[float, str, str]],
+    *,
+    truth_count: int,
+    prediction_count: int,
+    active_prediction_ids: set[str],
+) -> dict[str, float]:
+    matched_truth: set[str] = set()
+    matched_predictions: set[str] = set()
+    for _, truth_id, prediction_id in candidate_edges:
+        if prediction_id not in active_prediction_ids:
+            continue
+        if truth_id in matched_truth or prediction_id in matched_predictions:
+            continue
+        matched_truth.add(truth_id)
+        matched_predictions.add(prediction_id)
+
+    tp = len(matched_predictions)
+    fp = prediction_count - tp
+    fn = truth_count - tp
+    precision = _safe_div(tp, tp + fp)
+    recall = _safe_div(tp, tp + fn)
+    f1 = _safe_div(2 * precision * recall, precision + recall)
+    return {"tp": float(tp), "fp": float(fp), "fn": float(fn), "precision": precision, "recall": recall, "f1": f1}
+
+
+def average_precision_from_points(
+    points: Sequence[tuple[float, float]],
+    best_f1: float,
+    n_thresholds: int,
+) -> dict[str, float]:
     precision_by_recall: dict[float, float] = {}
     for recall, precision in points:
         precision_by_recall[recall] = max(precision_by_recall.get(recall, 0.0), precision)
@@ -54,7 +154,7 @@ def detection_average_precision(
         ap += max(0.0, recall - previous_recall) * envelope_by_recall[recall]
         previous_recall = max(previous_recall, recall)
 
-    return {"ap": ap, "best_f1": best_f1, "n_thresholds": float(len(thresholds))}
+    return {"ap": ap, "best_f1": best_f1, "n_thresholds": float(n_thresholds)}
 
 
 def classification_metrics(

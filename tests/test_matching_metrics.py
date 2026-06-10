@@ -6,6 +6,7 @@ from sdss_point_benchmark.metrics import (
     classification_metrics,
     detection_average_precision,
     detection_metrics,
+    detection_score_curve,
     photometry_metrics,
 )
 from sdss_point_benchmark.schema import PredictionRecord, SourceRecord
@@ -92,6 +93,30 @@ class MatchingMetricTests(unittest.TestCase):
         self.assertGreater(ap["ap"], 0.8)
         self.assertEqual(ap["n_thresholds"], 3.0)
         self.assertAlmostEqual(ap["best_f1"], 0.8)
+
+    def test_detection_score_curve_reuses_matching_candidates(self):
+        truth = [
+            SourceRecord("t1", "c1", 10.0, 0.0, "star"),
+            SourceRecord("t2", "c1", 20.0, 0.0, "star", psf_fwhm=0.6),
+            SourceRecord("t3", "c1", 30.0, 0.0, "star", psf_fwhm=3.0),
+        ]
+        predictions = [
+            PredictionRecord("p1", "c1", 10.0001, 0.0, "star", score=0.9),
+            PredictionRecord("p2", "c1", 20.0002, 0.0, "star", score=0.8),
+            PredictionRecord("p3", "c1", 30.0002, 0.0, "star", score=0.7),
+        ]
+
+        curve = detection_score_curve(
+            truth,
+            predictions,
+            max_radius_arcsec=1.0,
+            psf_fraction=0.5,
+        )
+
+        self.assertEqual(curve["best_threshold"], 0.7)
+        self.assertEqual(curve["average_precision"]["n_thresholds"], 3.0)
+        self.assertEqual(curve["best_metrics"]["tp"], 2.0)
+        self.assertEqual(curve["best_metrics"]["fn"], 1.0)
 
 
 if __name__ == "__main__":
