@@ -1,5 +1,10 @@
 # Automation Runbook
 
+For Codex sessions acting as autonomous research co-authors, first read
+`docs/research/codex_research_agent.md`. That playbook defines the required
+session preflight, evidence ladder, GPU policy, review checklist, and
+end-of-session summary format.
+
 ## Directory Policy
 
 Raw SDSS data stays outside the repository at:
@@ -158,6 +163,7 @@ Build cross-run state:
 make research-board
 make research-next
 make research-compare-latest
+make research-agent-plan
 ```
 
 These write:
@@ -169,7 +175,14 @@ reports/research_runs/board.md
 reports/research_runs/evidence_ledger.json
 reports/research_runs/compare_latest.json
 reports/research_runs/compare_latest.md
+reports/research_runs/agent_plan.json
+reports/research_runs/agent_plan.md
 ```
+
+The agent plan is a conservative, autopilot-compatible program generated from
+the current evidence board. It queues e5/e20 diagnostics automatically and keeps
+paper-scale e50 or multi-seed runs under `pending_approval_variants` unless the
+autonomy mode is explicitly changed.
 
 Diagnose a specific run:
 

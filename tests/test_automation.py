@@ -117,6 +117,8 @@ class AutomationTests(unittest.TestCase):
                     "1",
                     "--base-channels",
                     "4",
+                    "--heatmap-sigma",
+                    "2.4",
                     "--model-arch",
                     "unet_lite",
                     "--loader-mode",
@@ -142,6 +144,7 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(report["metrics"]["status"], "available")
         self.assertEqual(report["claim_gate"]["status"], "engineering_check")
         self.assertEqual(report["run_options"]["train_limit_samples"], 1)
+        self.assertEqual(report["run_options"]["heatmap_sigma"], 2.4)
         self.assertEqual(report["run_options"]["model_arch"], "unet_lite")
         self.assertEqual(report["run_options"]["loader_mode"], "shard_grouped")
         self.assertTrue(summary_exists)
@@ -393,6 +396,7 @@ def _write_program(root: Path, config: Path, dataset_dir: Path) -> Path:
                     "epochs": 1,
                     "batch_size": 1,
                     "base_channels": 4,
+                    "heatmap_sigma": 2.4,
                     "candidate_threshold": 0.0,
                     "max_detections_per_cutout": 4,
                     "predict_limit": 1,

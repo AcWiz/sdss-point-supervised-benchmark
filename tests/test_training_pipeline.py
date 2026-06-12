@@ -11,7 +11,7 @@ from astropy.wcs import WCS
 
 from sdss_point_benchmark.cli import _evaluate_payload, _select_split_truth_records, main
 from sdss_point_benchmark.schema import PredictionRecord, SourceRecord
-from sdss_point_benchmark.training import NpzCutoutDataset, ShardBatchSampler, train_model
+from sdss_point_benchmark.training import NpzCutoutDataset, ShardBatchSampler, resolve_loss_config, train_model
 
 
 class TrainingPipelineTests(unittest.TestCase):
@@ -113,6 +113,14 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(checkpoint["model"]["model_arch"], "baseline")
         self.assertIn("model_state_dict", checkpoint)
         self.assertIn("samples_per_second", report_payload)
+        self.assertIn("samples_per_second", report_payload["history"][0])
+        self.assertEqual(report_payload["loss"]["variant"], "full_psf_point_supervised")
+        self.assertEqual(report_payload["loss"]["psf_reconstruction_weight"], 0.2)
+        self.assertIsInstance(report_payload["cuda_available"], bool)
+        self.assertEqual(report_payload["device"], "cpu")
+        self.assertIsNone(report_payload["device_name"])
+        self.assertIsNone(report_payload["memory_allocated_peak_mb"])
+        self.assertIsNone(report_payload["memory_reserved_peak_mb"])
 
     def test_shard_batch_sampler_groups_samples_without_dropping(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -151,6 +159,42 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(report["loader"]["shard_cache_size"], 1)
         self.assertEqual(checkpoint["model"]["model_arch"], "unet_lite")
 
+    def test_loss_config_supports_method_ablations_and_overrides(self):
+        config = {"method": {"losses": {"psf_reconstruction_weight": 0.3, "class_weight": 0.4}}}
+
+        no_psf = resolve_loss_config(config, loss_variant="no_psf_reconstruction")
+        center_only = resolve_loss_config(config, loss_variant="center_only", center_loss_weight=2.0)
+
+        self.assertEqual(no_psf.psf_reconstruction_weight, 0.0)
+        self.assertEqual(no_psf.class_weight, 0.4)
+        self.assertEqual(center_only.center_weight, 2.0)
+        self.assertEqual(center_only.photometry_weight, 0.0)
+        self.assertEqual(center_only.class_weight, 0.0)
+
+    def test_train_model_passes_loss_weights_to_baseline_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_dir = _write_tiny_dataset(Path(tmp) / "dataset")
+            output_dir = Path(tmp) / "checkpoint"
+
+            report = train_model(
+                config_path=None,
+                dataset_dir=dataset_dir,
+                output_dir=output_dir,
+                epochs=1,
+                batch_size=1,
+                base_channels=4,
+                loss_variant="no_psf_reconstruction",
+                class_loss_weight=0.25,
+                device="cpu",
+                seed=0,
+            )
+            checkpoint = torch.load(output_dir / "best.pt", map_location="cpu", weights_only=False)
+
+        self.assertEqual(report["loss"]["variant"], "no_psf_reconstruction")
+        self.assertEqual(report["loss"]["psf_reconstruction_weight"], 0.0)
+        self.assertEqual(report["loss"]["class_weight"], 0.25)
+        self.assertEqual(checkpoint["loss"]["psf_reconstruction_weight"], 0.0)
+
     def test_cli_train_and_predict_run_on_tiny_dataset(self):
         with tempfile.TemporaryDirectory() as tmp:
             dataset_dir = _write_tiny_dataset(Path(tmp) / "dataset")
@@ -181,10 +225,12 @@ class TrainingPipelineTests(unittest.TestCase):
                     "1",
                     "--batch-size",
                     "1",
-                    "--base-channels",
-                    "4",
-                    "--model-arch",
-                    "unet_lite",
+                "--base-channels",
+                "4",
+                "--heatmap-sigma",
+                "2.4",
+                "--model-arch",
+                "unet_lite",
                     "--loader-mode",
                     "shard_grouped",
                     "--shard-cache-size",
@@ -197,6 +243,7 @@ class TrainingPipelineTests(unittest.TestCase):
                     "train",
                 ]
             )
+            training_report = json.loads((checkpoint_dir / "training_report.json").read_text(encoding="utf-8"))
             predict_code = main(
                 [
                     "predict",
@@ -226,6 +273,7 @@ class TrainingPipelineTests(unittest.TestCase):
             wcs = _tiny_r_band_wcs()
 
         self.assertEqual(train_code, 0)
+        self.assertEqual(training_report["heatmap_sigma"], 2.4)
         self.assertEqual(predict_code, 0)
         self.assertGreater(len(rows), 0)
         self.assertEqual(rows[0]["cutout_id"], "field-a__center-a")
@@ -380,6 +428,8 @@ class TrainingPipelineTests(unittest.TestCase):
                     "1",
                     "--base-channels",
                     "4",
+                    "--heatmap-sigma",
+                    "2.4",
                     "--candidate-threshold",
                     "0.0",
                     "--nms-radius",
@@ -394,12 +444,15 @@ class TrainingPipelineTests(unittest.TestCase):
             )
             checkpoint_exists = (checkpoint_dir / "best.pt").exists()
             summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+            training_report = json.loads((checkpoint_dir / "training_report.json").read_text(encoding="utf-8"))
             val_sweep = json.loads((report_dir / "val_threshold_sweep.json").read_text(encoding="utf-8"))
             test_metrics = json.loads((report_dir / "test_metrics.json").read_text(encoding="utf-8"))
 
         self.assertEqual(code, 0)
         self.assertTrue(checkpoint_exists)
         self.assertEqual(summary["status"], "generated")
+        self.assertEqual(summary["training"]["heatmap_sigma"], 2.4)
+        self.assertEqual(training_report["heatmap_sigma"], 2.4)
         self.assertEqual(summary["splits"]["val"]["truth_all"], 2)
         self.assertEqual(summary["splits"]["val"]["truth_kept"], 1)
         self.assertEqual(summary["splits"]["test"]["truth_kept"], 1)

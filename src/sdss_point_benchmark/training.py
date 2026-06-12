@@ -37,6 +37,16 @@ class DatasetSampleIndex:
     origin_y: int
 
 
+@dataclass(frozen=True)
+class LossConfig:
+    variant: str
+    center_weight: float = 1.0
+    photometry_weight: float = 1.0
+    multiband_weight: float = 0.05
+    psf_reconstruction_weight: float = 0.2
+    class_weight: float = 0.5
+
+
 class NpzCutoutDataset(Dataset):
     """Read pilot NPZ cutout shards and build point-supervision targets."""
 
@@ -236,6 +246,12 @@ def train_model(
     shard_cache_size: int = 0,
     num_workers: int = 0,
     pin_memory: bool | str = "auto",
+    loss_variant: str = "full_psf_point_supervised",
+    center_loss_weight: float | None = None,
+    photometry_loss_weight: float | None = None,
+    multiband_loss_weight: float | None = None,
+    psf_reconstruction_loss_weight: float | None = None,
+    class_loss_weight: float | None = None,
 ) -> dict[str, Any]:
     """Train the compact PSF-constrained baseline on prepared NPZ cutouts."""
 
@@ -260,12 +276,33 @@ def train_model(
         num_workers=num_workers,
         pin_memory=pin_memory_enabled,
     )
+    config_payload = _load_config(config_path)
+    loss_config = resolve_loss_config(
+        config_payload,
+        loss_variant=loss_variant,
+        center_loss_weight=center_loss_weight,
+        photometry_loss_weight=photometry_loss_weight,
+        multiband_loss_weight=multiband_loss_weight,
+        psf_reconstruction_loss_weight=psf_reconstruction_loss_weight,
+        class_loss_weight=class_loss_weight,
+    )
     model = make_catalog_model(model_arch, base_channels=base_channels).to(device_obj)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-    loss_fn = BaselineLoss(psf_reconstruction_weight=0.2, class_weight=0.5)
+    loss_fn = BaselineLoss(
+        center_weight=loss_config.center_weight,
+        photometry_weight=loss_config.photometry_weight,
+        multiband_weight=loss_config.multiband_weight,
+        psf_reconstruction_weight=loss_config.psf_reconstruction_weight,
+        class_weight=loss_config.class_weight,
+    )
     psf_kernel = gaussian_psf_kernel(psf_size, psf_sigma).to(device_obj)
     history: list[dict[str, float]] = []
     best_loss = float("inf")
+    cuda_available = torch.cuda.is_available()
+    cuda_training = device_obj.type == "cuda" and cuda_available
+    device_name = _device_name(device_obj) if cuda_training else None
+    if cuda_training:
+        torch.cuda.reset_peak_memory_stats(device_obj)
     total_started_at = time.perf_counter()
 
     for epoch in range(1, epochs + 1):
@@ -293,15 +330,20 @@ def train_model(
             _save_checkpoint(
                 output / "best.pt",
                 model=model,
-                config=_load_config(config_path),
+                config=config_payload,
                 dataset_dir=str(Path(dataset_dir)),
                 base_channels=base_channels,
                 model_arch=model_arch,
                 epoch=epoch,
                 train_loss=mean_loss,
                 heatmap_sigma=heatmap_sigma,
+                loss_config=loss_config,
             )
+    if cuda_training:
+        torch.cuda.synchronize(device_obj)
     total_seconds = time.perf_counter() - total_started_at
+    memory_allocated_peak_mb = _cuda_peak_memory_mb(device_obj, "allocated") if cuda_training else None
+    memory_reserved_peak_mb = _cuda_peak_memory_mb(device_obj, "reserved") if cuda_training else None
 
     report = {
         "status": "trained",
@@ -312,9 +354,22 @@ def train_model(
         "batch_size": batch_size,
         "learning_rate": learning_rate,
         "base_channels": base_channels,
+        "heatmap_sigma": heatmap_sigma,
         "model_arch": model_arch,
         "model_parameters": count_parameters(model),
+        "loss": {
+            "variant": loss_config.variant,
+            "center_weight": loss_config.center_weight,
+            "photometry_weight": loss_config.photometry_weight,
+            "multiband_weight": loss_config.multiband_weight,
+            "psf_reconstruction_weight": loss_config.psf_reconstruction_weight,
+            "class_weight": loss_config.class_weight,
+        },
         "device": str(device_obj),
+        "cuda_available": cuda_available,
+        "device_name": device_name,
+        "memory_allocated_peak_mb": memory_allocated_peak_mb,
+        "memory_reserved_peak_mb": memory_reserved_peak_mb,
         "best_train_loss": best_loss,
         "history": history,
         "total_seconds": total_seconds,
@@ -436,6 +491,61 @@ def gaussian_psf_kernel(size: int = 9, sigma: float = 1.3) -> Tensor:
     return kernel.view(1, 1, size, size)
 
 
+def resolve_loss_config(
+    config: Mapping[str, Any] | None = None,
+    *,
+    loss_variant: str = "full_psf_point_supervised",
+    center_loss_weight: float | None = None,
+    photometry_loss_weight: float | None = None,
+    multiband_loss_weight: float | None = None,
+    psf_reconstruction_loss_weight: float | None = None,
+    class_loss_weight: float | None = None,
+) -> LossConfig:
+    """Resolve method ablation loss weights from config plus explicit overrides."""
+
+    config_losses = {}
+    if isinstance(config, Mapping):
+        method = config.get("method", {})
+        if isinstance(method, Mapping):
+            maybe_losses = method.get("losses", {})
+            if isinstance(maybe_losses, Mapping):
+                config_losses = maybe_losses
+    variant = str(loss_variant or config_losses.get("variant") or "full_psf_point_supervised")
+    defaults = {
+        "center_weight": float(config_losses.get("center_weight", 1.0)),
+        "photometry_weight": float(config_losses.get("photometry_weight", 1.0)),
+        "multiband_weight": float(config_losses.get("multiband_consistency_weight", 0.05)),
+        "psf_reconstruction_weight": float(config_losses.get("psf_reconstruction_weight", 0.2)),
+        "class_weight": float(config_losses.get("class_weight", 0.5)),
+    }
+    if variant == "full_psf_point_supervised":
+        weights = defaults
+    elif variant == "no_psf_reconstruction":
+        weights = {**defaults, "psf_reconstruction_weight": 0.0}
+    elif variant == "center_only":
+        weights = {
+            "center_weight": defaults["center_weight"],
+            "photometry_weight": 0.0,
+            "multiband_weight": 0.0,
+            "psf_reconstruction_weight": 0.0,
+            "class_weight": 0.0,
+        }
+    else:
+        raise ValueError(f"unsupported loss_variant: {variant}")
+
+    overrides = {
+        "center_weight": center_loss_weight,
+        "photometry_weight": photometry_loss_weight,
+        "multiband_weight": multiband_loss_weight,
+        "psf_reconstruction_weight": psf_reconstruction_loss_weight,
+        "class_weight": class_loss_weight,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            weights[key] = float(value)
+    return LossConfig(variant=variant, **weights)
+
+
 def _load_shard_arrays(path: Path) -> dict[str, np.ndarray]:
     with np.load(path) as shard:
         return {name: np.asarray(shard[name]) for name in shard.files}
@@ -501,6 +611,22 @@ def _resolve_pin_memory(pin_memory: bool | str, device: torch.device) -> bool:
     if normalized == "false":
         return False
     raise ValueError("pin_memory must be 'auto', 'true', 'false', True, or False")
+
+
+def _device_name(device: torch.device) -> str | None:
+    if device.type != "cuda":
+        return None
+    return str(torch.cuda.get_device_name(device))
+
+
+def _cuda_peak_memory_mb(device: torch.device, kind: str) -> float:
+    if kind == "allocated":
+        bytes_value = torch.cuda.max_memory_allocated(device)
+    elif kind == "reserved":
+        bytes_value = torch.cuda.max_memory_reserved(device)
+    else:
+        raise ValueError(f"unsupported CUDA memory peak kind: {kind}")
+    return float(bytes_value) / float(1024 * 1024)
 
 
 def count_parameters(model: torch.nn.Module) -> int:
@@ -626,6 +752,7 @@ def _save_checkpoint(
     epoch: int,
     train_loss: float,
     heatmap_sigma: float,
+    loss_config: LossConfig,
 ) -> None:
     torch.save(
         {
@@ -640,6 +767,14 @@ def _save_checkpoint(
             },
             "model_state_dict": model.state_dict(),
             "config": dict(config),
+            "loss": {
+                "variant": loss_config.variant,
+                "center_weight": loss_config.center_weight,
+                "photometry_weight": loss_config.photometry_weight,
+                "multiband_weight": loss_config.multiband_weight,
+                "psf_reconstruction_weight": loss_config.psf_reconstruction_weight,
+                "class_weight": loss_config.class_weight,
+            },
             "dataset_dir": dataset_dir,
             "epoch": epoch,
             "train_loss": train_loss,

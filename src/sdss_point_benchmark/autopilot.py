@@ -25,6 +25,13 @@ from .research_program import (
     render_diagnosis_markdown,
 )
 
+DEPENDENCY_GATE_ORDER = {
+    "blocked": 0,
+    "complete": 1,
+    "engineering_check": 2,
+    "candidate_evidence": 3,
+}
+
 
 @dataclass(frozen=True)
 class AutopilotOptions:
@@ -51,6 +58,12 @@ class GpuSnapshot:
         return float(self.memory_total_mb - self.memory_used_mb) / 1024.0
 
 
+@dataclass(frozen=True)
+class RunDependency:
+    run_id: str
+    gate: str = "complete"
+
+
 def run_research_autopilot(
     *,
     program_path: str | Path,
@@ -63,6 +76,11 @@ def run_research_autopilot(
     specs = expand_research_program(program, run_prefix=options.run_prefix, dry_run=not options.execute)
     dependencies = build_dependency_map(program, options.run_prefix)
     existing = {spec.run_id: inspect_existing_run(spec) for spec in specs}
+    completed_gates: dict[str, str] = {
+        run_id: status.get("claim_gate", "")
+        for run_id, status in existing.items()
+        if status.get("status") == "complete"
+    }
     payload: dict[str, Any] = {
         "schema_version": 1,
         "protocol": PROTOCOL,
@@ -80,7 +98,12 @@ def run_research_autopilot(
                 "dry_run": spec.dry_run,
                 "claims": list(spec.claims),
                 "claim_gate_policy": dict(spec.claim_gate_policy or {}),
-                "depends_on": dependencies.get(spec.run_id, []),
+                "depends_on": [dependency.run_id for dependency in dependencies.get(spec.run_id, [])],
+                "dependency_gate": dependency_gate_for_run(dependencies, spec.run_id),
+                "dependencies": [
+                    {"run_id": dependency.run_id, "gate": dependency.gate}
+                    for dependency in dependencies.get(spec.run_id, [])
+                ],
                 "existing_status": existing[spec.run_id],
             }
             for spec in specs
@@ -104,6 +127,7 @@ def run_research_autopilot(
         status = existing[run_id]
         if status["status"] == "complete":
             completed.append(run_id)
+            completed_gates[run_id] = status.get("claim_gate", "")
             skipped.append({"run_id": run_id, "report": status.get("report", "")})
             refresh_research_outputs(Path(spec.report_dir).parent, spec)
             _append_jsonl(events_path, {"time": utc_now(), "event": "skipped_existing", "run_id": run_id, "report": status.get("report", "")})
@@ -132,6 +156,7 @@ def run_research_autopilot(
             busy_gpu_indices.discard(running_run.gpu_index)
             if return_code == 0:
                 completed.append(run_id)
+                completed_gates[run_id] = inspect_existing_run(running_run.spec).get("claim_gate", "")
                 refresh_research_outputs(Path(running_run.spec.report_dir).parent, running_run.spec)
                 _append_jsonl(
                     events_path,
@@ -162,10 +187,48 @@ def run_research_autopilot(
         failed_or_blocked = {row["run_id"] for row in failed} | {row["run_id"] for row in blocked}
         for run_id in list(pending):
             deps = dependencies.get(run_id, [])
-            failed_deps = [dep for dep in deps if dep in failed_or_blocked]
+            failed_deps = [dep.run_id for dep in deps if dep.run_id in failed_or_blocked]
             if failed_deps:
                 blocked.append({"run_id": run_id, "error": f"dependency failed: {', '.join(failed_deps)}"})
                 _append_jsonl(events_path, {"time": utc_now(), "event": "blocked", "run_id": run_id, "dependencies": failed_deps})
+                del pending[run_id]
+                continue
+            insufficient_deps = [
+                dependency
+                for dependency in deps
+                if dependency.run_id in completed and not dependency_gate_satisfied(
+                    completed_gates.get(dependency.run_id, ""),
+                    dependency.gate,
+                )
+            ]
+            if insufficient_deps:
+                blocked.append(
+                    {
+                        "run_id": run_id,
+                        "error": "dependency gate not satisfied: "
+                        + ", ".join(
+                            f"{dependency.run_id} has {completed_gates.get(dependency.run_id, '') or 'complete'} "
+                            f"but requires {dependency.gate}"
+                            for dependency in insufficient_deps
+                        ),
+                    }
+                )
+                _append_jsonl(
+                    events_path,
+                    {
+                        "time": utc_now(),
+                        "event": "blocked_dependency_gate",
+                        "run_id": run_id,
+                        "dependencies": [
+                            {
+                                "run_id": dependency.run_id,
+                                "required_gate": dependency.gate,
+                                "observed_gate": completed_gates.get(dependency.run_id, ""),
+                            }
+                            for dependency in insufficient_deps
+                        ],
+                    },
+                )
                 del pending[run_id]
 
         capacity = max(0, options.max_jobs - len(running))
@@ -176,7 +239,11 @@ def run_research_autopilot(
         ready_specs = [
             spec
             for run_id, spec in pending.items()
-            if all(dep in completed for dep in dependencies.get(run_id, []))
+            if all(
+                dependency.run_id in completed
+                and dependency_gate_satisfied(completed_gates.get(dependency.run_id, ""), dependency.gate)
+                for dependency in dependencies.get(run_id, [])
+            )
         ]
         started_any = False
         for spec in ready_specs[:capacity]:
@@ -242,18 +309,41 @@ class RunningRun:
     log_path: Path
 
 
-def build_dependency_map(program, run_prefix: str | None) -> dict[str, list[str]]:
+def build_dependency_map(program, run_prefix: str | None) -> dict[str, list[RunDependency]]:
     mapping: dict[str, str] = {}
     for variant in program.variants:
         merged = dict(program.defaults)
         merged.update(variant.run)
         run_id = str(merged.get("run_id") or default_run_id(program.program_id, variant.variant_id, run_prefix))
         mapping[variant.variant_id] = run_id
-    dependencies: dict[str, list[str]] = {}
+    dependencies: dict[str, list[RunDependency]] = {}
     for variant in program.variants:
         run_id = mapping[variant.variant_id]
-        dependencies[run_id] = [mapping.get(dep, dep) for dep in variant.depends_on]
+        dependency_gate = normalize_dependency_gate(getattr(variant, "dependency_gate", "complete"))
+        dependencies[run_id] = [RunDependency(mapping.get(dep, dep), dependency_gate) for dep in variant.depends_on]
     return dependencies
+
+
+def normalize_dependency_gate(gate: str) -> str:
+    normalized = str(gate or "complete").strip()
+    if normalized not in DEPENDENCY_GATE_ORDER:
+        raise ValueError(f"unsupported dependency_gate: {gate!r}")
+    return normalized
+
+
+def dependency_gate_for_run(dependencies: dict[str, list[RunDependency]], run_id: str) -> str:
+    gates = {dependency.gate for dependency in dependencies.get(run_id, [])}
+    if not gates:
+        return "complete"
+    return sorted(gates, key=lambda gate: DEPENDENCY_GATE_ORDER[gate], reverse=True)[0]
+
+
+def dependency_gate_satisfied(observed_gate: str, required_gate: str) -> bool:
+    required = normalize_dependency_gate(required_gate)
+    if required == "complete":
+        return True
+    observed = str(observed_gate or "complete")
+    return DEPENDENCY_GATE_ORDER.get(observed, 0) >= DEPENDENCY_GATE_ORDER[required]
 
 
 def default_run_id(program_id: str, variant_id: str, run_prefix: str | None) -> str:
@@ -292,6 +382,8 @@ def start_research_run_process(spec, log_path: Path) -> subprocess.Popen:
         str(spec.learning_rate),
         "--base-channels",
         str(spec.base_channels),
+        "--heatmap-sigma",
+        str(spec.heatmap_sigma),
         "--model-arch",
         spec.model_arch,
         "--loader-mode",
@@ -302,6 +394,8 @@ def start_research_run_process(spec, log_path: Path) -> subprocess.Popen:
         str(spec.num_workers),
         "--pin-memory",
         str(spec.pin_memory).lower(),
+        "--loss-variant",
+        spec.loss_variant,
         "--device",
         spec.device,
         "--seed",
@@ -321,6 +415,16 @@ def start_research_run_process(spec, log_path: Path) -> subprocess.Popen:
     ]
     if spec.train_limit_samples is not None:
         command.extend(["--train-limit-samples", str(spec.train_limit_samples)])
+    if spec.center_loss_weight is not None:
+        command.extend(["--center-loss-weight", str(spec.center_loss_weight)])
+    if spec.photometry_loss_weight is not None:
+        command.extend(["--photometry-loss-weight", str(spec.photometry_loss_weight)])
+    if spec.multiband_loss_weight is not None:
+        command.extend(["--multiband-loss-weight", str(spec.multiband_loss_weight)])
+    if spec.psf_reconstruction_loss_weight is not None:
+        command.extend(["--psf-reconstruction-loss-weight", str(spec.psf_reconstruction_loss_weight)])
+    if spec.class_loss_weight is not None:
+        command.extend(["--class-loss-weight", str(spec.class_loss_weight)])
     if spec.max_detections_per_cutout is not None:
         command.extend(["--max-detections-per-cutout", str(spec.max_detections_per_cutout)])
     if spec.predict_limit is not None:

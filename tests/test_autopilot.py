@@ -8,6 +8,7 @@ from sdss_point_benchmark.autopilot import (
     AutopilotOptions,
     GpuSnapshot,
     build_dependency_map,
+    dependency_gate_satisfied,
     run_research_autopilot,
     start_research_run_process,
     wait_for_available_gpu,
@@ -38,6 +39,49 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(written["runs"][0]["claims"], ["scheduler"])
         self.assertEqual(written["runs"][0]["existing_status"]["status"], "absent")
 
+    def test_autopilot_empty_queue_dry_run_writes_noop_scheduler_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_dir = _write_tiny_dataset(root / "dataset")
+            config = _write_config(root)
+            program = _write_program(root, config, dataset_dir, variants=[])
+            output = root / "scheduler"
+
+            payload = run_research_autopilot(
+                program_path=program,
+                output_dir=output,
+                options=AutopilotOptions(run_prefix="dry", execute=False),
+            )
+            written = json.loads((output / "scheduler_plan.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["status"], "planned")
+        self.assertEqual(payload["runs"], [])
+        self.assertEqual(written["runs"], [])
+
+    def test_autopilot_empty_queue_execute_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_dir = _write_tiny_dataset(root / "dataset")
+            config = _write_config(root)
+            program = _write_program(root, config, dataset_dir, variants=[])
+            output = root / "scheduler"
+
+            with patch("sdss_point_benchmark.autopilot.start_research_run_process") as start:
+                payload = run_research_autopilot(
+                    program_path=program,
+                    output_dir=output,
+                    options=AutopilotOptions(run_prefix="queue", execute=True, poll_seconds=0, sample_seconds=0),
+                )
+            written = json.loads((output / "scheduler_execution.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["runs"], [])
+        self.assertEqual(payload["completed"], [])
+        self.assertEqual(payload["failed"], [])
+        self.assertEqual(payload["blocked"], [])
+        self.assertEqual(written["runs"], [])
+        start.assert_not_called()
+
     def test_dependency_map_resolves_variant_ids_to_prefixed_run_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -47,7 +91,30 @@ class AutopilotTests(unittest.TestCase):
 
             dependencies = build_dependency_map(program, "queue")
 
-        self.assertEqual(dependencies["queue_followup"], ["queue_baseline"])
+        self.assertEqual([dependency.run_id for dependency in dependencies["queue_followup"]], ["queue_baseline"])
+        self.assertEqual(dependencies["queue_followup"][0].gate, "complete")
+
+    def test_dependency_map_records_variant_dependency_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_dir = _write_tiny_dataset(root / "dataset")
+            config = _write_config(root)
+            program = load_research_program(
+                _write_program(
+                    root,
+                    config,
+                    dataset_dir,
+                    include_dependency=True,
+                    dependency_gate="candidate_evidence",
+                )
+            )
+
+            dependencies = build_dependency_map(program, "queue")
+
+        self.assertEqual(dependencies["queue_followup"][0].run_id, "queue_baseline")
+        self.assertEqual(dependencies["queue_followup"][0].gate, "candidate_evidence")
+        self.assertTrue(dependency_gate_satisfied("candidate_evidence", "candidate_evidence"))
+        self.assertFalse(dependency_gate_satisfied("engineering_check", "candidate_evidence"))
 
     def test_start_research_run_process_passes_research_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,6 +136,38 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("--claim", command)
         self.assertIn("scheduler", command)
         self.assertIn("--claim-gate-policy-json", command)
+
+    def test_research_program_expands_loss_variant_and_scheduler_passes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_dir = _write_tiny_dataset(root / "dataset")
+            config = _write_config(root)
+            program = load_research_program(
+                _write_program(
+                    root,
+                    config,
+                    dataset_dir,
+                    run_overrides={
+                        "loss_variant": "no_psf_reconstruction",
+                        "heatmap_sigma": 2.4,
+                        "class_loss_weight": 0.25,
+                    },
+                )
+            )
+            spec = expand_research_program(program, run_prefix="queue", dry_run=False)[0]
+            with patch("sdss_point_benchmark.autopilot.subprocess.Popen") as popen:
+                start_research_run_process(spec, root / "logs" / "run.log")
+                command = popen.call_args.args[0]
+
+        self.assertEqual(spec.loss_variant, "no_psf_reconstruction")
+        self.assertEqual(spec.heatmap_sigma, 2.4)
+        self.assertEqual(spec.class_loss_weight, 0.25)
+        self.assertIn("--loss-variant", command)
+        self.assertIn("no_psf_reconstruction", command)
+        self.assertIn("--heatmap-sigma", command)
+        self.assertIn("2.4", command)
+        self.assertIn("--class-loss-weight", command)
+        self.assertIn("0.25", command)
 
     def test_wait_for_available_gpu_requires_two_available_samples(self):
         busy = [GpuSnapshot(index=0, name="GPU", memory_total_mb=24576, memory_used_mb=20000, utilization_gpu=0)]
@@ -123,6 +222,92 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(payload["skipped"][0]["run_id"], "queue_baseline")
         start.assert_not_called()
 
+    def test_autopilot_blocks_dependent_run_when_parent_gate_is_insufficient(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_dir = _write_tiny_dataset(root / "dataset")
+            config = _write_config(root)
+            program = _write_program(
+                root,
+                config,
+                dataset_dir,
+                include_dependency=True,
+                dependency_gate="candidate_evidence",
+            )
+            report_dir = root / "reports" / "research_runs" / "queue_baseline"
+            report_dir.mkdir(parents=True)
+            (report_dir / "report.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "queue_baseline",
+                        "status": "executed",
+                        "claim_gate": {"status": "engineering_check"},
+                        "metrics": {"test": {"counts": {}, "detection": {}}},
+                        "claims": ["scheduler"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch("sdss_point_benchmark.autopilot.start_research_run_process") as start:
+                payload = run_research_autopilot(
+                    program_path=program,
+                    output_dir=root / "scheduler",
+                    options=AutopilotOptions(run_prefix="queue", execute=True, poll_seconds=0, sample_seconds=0),
+                )
+
+        self.assertEqual(payload["status"], "completed_with_failures")
+        self.assertEqual(payload["completed"], ["queue_baseline"])
+        self.assertEqual(payload["blocked"][0]["run_id"], "queue_followup")
+        self.assertIn("requires candidate_evidence", payload["blocked"][0]["error"])
+        start.assert_not_called()
+
+    def test_autopilot_existing_candidate_evidence_unlocks_dependent_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_dir = _write_tiny_dataset(root / "dataset")
+            config = _write_config(root)
+            program = _write_program(
+                root,
+                config,
+                dataset_dir,
+                include_dependency=True,
+                dependency_gate="candidate_evidence",
+            )
+            report_dir = root / "reports" / "research_runs" / "queue_baseline"
+            report_dir.mkdir(parents=True)
+            (report_dir / "report.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "queue_baseline",
+                        "status": "executed",
+                        "claim_gate": {"status": "candidate_evidence"},
+                        "metrics": {"test": {"counts": {}, "detection": {}}},
+                        "claims": ["scheduler"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            completed_process = _CompletedProcess()
+
+            with (
+                patch("sdss_point_benchmark.autopilot.start_research_run_process", return_value=completed_process) as start,
+                patch("sdss_point_benchmark.autopilot.query_gpus", return_value=[]),
+            ):
+                payload = run_research_autopilot(
+                    program_path=program,
+                    output_dir=root / "scheduler",
+                    options=AutopilotOptions(run_prefix="queue", execute=True, poll_seconds=0, sample_seconds=0),
+                )
+
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["completed"], ["queue_baseline", "queue_followup"])
+        self.assertEqual(payload["blocked"], [])
+        self.assertEqual(start.call_count, 1)
+        self.assertEqual(start.call_args.args[0].run_id, "queue_followup")
+
     def test_autopilot_execute_blocks_nonempty_incomplete_report_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -146,6 +331,19 @@ class AutopilotTests(unittest.TestCase):
         start.assert_not_called()
 
 
+class _CompletedProcess:
+    pid = 12345
+
+    def poll(self):
+        return 0
+
+    def terminate(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+
 def _write_config(root: Path) -> Path:
     config = root / "config.json"
     config.write_text(
@@ -162,21 +360,34 @@ def _write_config(root: Path) -> Path:
     return config
 
 
-def _write_program(root: Path, config: Path, dataset_dir: Path, include_dependency: bool = False) -> Path:
-    variants = [
-        {
-            "variant_id": "baseline",
-            "hypothesis": "Autopilot writes a dry-run queue.",
-            "tags": ["smoke", "fixed_split"],
-            "claims": ["scheduler"],
-            "run": {},
-        }
-    ]
+def _write_program(
+    root: Path,
+    config: Path,
+    dataset_dir: Path,
+    include_dependency: bool = False,
+    dependency_gate: str | None = None,
+    run_overrides: dict | None = None,
+    variants: list[dict] | None = None,
+) -> Path:
+    baseline_run = {}
+    if run_overrides:
+        baseline_run.update(run_overrides)
+    if variants is None:
+        variants = [
+            {
+                "variant_id": "baseline",
+                "hypothesis": "Autopilot writes a dry-run queue.",
+                "tags": ["smoke", "fixed_split"],
+                "claims": ["scheduler"],
+                "run": baseline_run,
+            }
+        ]
     if include_dependency:
         variants.append(
             {
                 "variant_id": "followup",
                 "depends_on": ["baseline"],
+                **({"dependency_gate": dependency_gate} if dependency_gate is not None else {}),
                 "hypothesis": "Autopilot preserves dependencies.",
                 "tags": ["smoke", "fixed_split"],
                 "claims": ["scheduler"],

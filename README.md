@@ -33,8 +33,14 @@ matters.
   records provenance, writes JSON/Markdown reports, and gates paper claims.
 - A research-program layer for queueing experiment variants, indexing runs,
   comparing evidence, diagnosing failures, and tracking paper-claim support.
+- A Codex research-agent playbook for repeatable start-of-session inspection,
+  evidence review, experiment critique, and next-step planning.
 
 ## Quick Start
+
+For autonomous research-agent sessions, read
+[`docs/research/codex_research_agent.md`](docs/research/codex_research_agent.md)
+before launching experiments or changing automation.
 
 Create the recommended Python 3.11 conda environment:
 
@@ -149,7 +155,12 @@ After runs exist, build the cross-run board and evidence ledger:
 ```bash
 make research-board
 make research-next
+make research-agent-plan
 ```
+
+`research-agent-plan` writes `reports/research_runs/agent_plan.json/.md`. The
+JSON is an autopilot-compatible program for the next conservative diagnostic
+queue; e50 and multi-seed runs stay in `pending_approval_variants` by default.
 
 Compare all runs or diagnose a specific report:
 

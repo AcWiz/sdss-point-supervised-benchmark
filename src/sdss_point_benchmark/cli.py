@@ -39,6 +39,19 @@ class SplitTruthSelection:
     kept_quality_counts: dict[str, int]
 
 
+def _add_loss_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--loss-variant",
+        default="full_psf_point_supervised",
+        choices=["full_psf_point_supervised", "no_psf_reconstruction", "center_only"],
+    )
+    parser.add_argument("--center-loss-weight", type=float)
+    parser.add_argument("--photometry-loss-weight", type=float)
+    parser.add_argument("--multiband-loss-weight", type=float)
+    parser.add_argument("--psf-reconstruction-loss-weight", type=float)
+    parser.add_argument("--class-loss-weight", type=float)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sdss-point-benchmark")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -107,6 +120,58 @@ def main(argv: list[str] | None = None) -> int:
     evaluate_parser.add_argument("--min-score", type=float)
     evaluate_parser.add_argument("--filter-truth-to-prediction-cutouts", action="store_true")
 
+    synthetic_validation_parser = subparsers.add_parser(
+        "research-synthetic-injection",
+        help="evaluate a checkpoint on fixed controlled synthetic injections over pilot backgrounds",
+    )
+    synthetic_validation_parser.add_argument("--checkpoint", required=True, help="model checkpoint path")
+    synthetic_validation_parser.add_argument("--dataset", required=True, help="prepared NPZ dataset directory")
+    synthetic_validation_parser.add_argument("--output-dir", required=True, help="synthetic validation output directory")
+    synthetic_validation_parser.add_argument("--split", help="split JSON used to filter backgrounds")
+    synthetic_validation_parser.add_argument("--split-name", help="split name to read from --split")
+    synthetic_validation_parser.add_argument("--device", default="cpu")
+    synthetic_validation_parser.add_argument("--seed", type=int, default=42)
+    synthetic_validation_parser.add_argument("--num-backgrounds", type=int, default=16)
+    synthetic_validation_parser.add_argument("--injections-per-background", type=int, default=4)
+    synthetic_validation_parser.add_argument("--threshold", type=float, default=0.2)
+    synthetic_validation_parser.add_argument("--nms-radius", type=int, default=2)
+    synthetic_validation_parser.add_argument("--match-radius-pixels", type=float, default=2.0)
+    synthetic_validation_parser.add_argument("--max-detections-per-cutout", type=int, default=16)
+    synthetic_validation_parser.add_argument("--shard-cache-size", type=int, default=2)
+    synthetic_validation_parser.add_argument("--psf-sigma", type=float, default=1.3)
+
+    synthetic_diagnostic_parser = subparsers.add_parser(
+        "research-synthetic-faint-diagnostic",
+        help="diagnose faint injected-source recovery from a synthetic validation run directory",
+    )
+    synthetic_diagnostic_parser.add_argument("--validation-dir", required=True, help="synthetic validation run directory")
+    synthetic_diagnostic_parser.add_argument("--output-dir", required=True, help="diagnostic output directory")
+    synthetic_diagnostic_parser.add_argument("--threshold", type=float, help="score threshold to audit")
+    synthetic_diagnostic_parser.add_argument("--match-radius-pixels", type=float, help="matching radius to audit")
+    synthetic_diagnostic_parser.add_argument("--max-thresholds", type=int, default=64)
+
+    synthetic_heatmap_parser = subparsers.add_parser(
+        "research-synthetic-heatmap-diagnostic",
+        help="measure raw center-heatmap response at injected-source locations",
+    )
+    synthetic_heatmap_parser.add_argument("--validation-dir", required=True, help="synthetic validation run directory")
+    synthetic_heatmap_parser.add_argument("--output-dir", required=True, help="diagnostic output directory")
+    synthetic_heatmap_parser.add_argument("--device", default="cpu")
+    synthetic_heatmap_parser.add_argument("--search-radius-pixels", type=float, default=8.0)
+    synthetic_heatmap_parser.add_argument("--low-floor", type=float, default=0.05)
+    synthetic_heatmap_parser.add_argument("--shard-cache-size", type=int)
+
+    synthetic_morphology_parser = subparsers.add_parser(
+        "research-synthetic-morphology-diagnostic",
+        help="sweep faint synthetic source morphology for center-heatmap response diagnostics",
+    )
+    synthetic_morphology_parser.add_argument("--validation-dir", required=True, help="synthetic validation run directory")
+    synthetic_morphology_parser.add_argument("--output-dir", required=True, help="diagnostic output directory")
+    synthetic_morphology_parser.add_argument("--device", default="cpu")
+    synthetic_morphology_parser.add_argument("--search-radius-pixels", type=float, default=8.0)
+    synthetic_morphology_parser.add_argument("--low-floor", type=float, default=0.05)
+    synthetic_morphology_parser.add_argument("--shard-cache-size", type=int)
+
     sweep_parser = subparsers.add_parser("sweep-thresholds", help="select a validation score threshold")
     sweep_parser.add_argument("--truth", required=True, help="CSV source truth catalog")
     sweep_parser.add_argument("--predictions", required=True, help="CSV prediction catalog")
@@ -125,11 +190,13 @@ def main(argv: list[str] | None = None) -> int:
     train_parser.add_argument("--batch-size", type=int, default=16)
     train_parser.add_argument("--learning-rate", type=float, default=1e-3)
     train_parser.add_argument("--base-channels", type=int, default=32)
+    train_parser.add_argument("--heatmap-sigma", type=float, default=1.5)
     train_parser.add_argument("--model-arch", default="baseline", choices=["baseline", "unet_lite"])
     train_parser.add_argument("--loader-mode", default="sample", choices=["sample", "shard_grouped"])
     train_parser.add_argument("--shard-cache-size", type=int, default=0)
     train_parser.add_argument("--num-workers", type=int, default=0)
     train_parser.add_argument("--pin-memory", default="auto", choices=["auto", "true", "false"])
+    _add_loss_arguments(train_parser)
     train_parser.add_argument("--device", default="cpu")
     train_parser.add_argument("--seed", type=int, default=42)
     train_parser.add_argument("--split", help="split JSON used to filter dataset samples")
@@ -171,11 +238,13 @@ def main(argv: list[str] | None = None) -> int:
     pilot_loop_parser.add_argument("--batch-size", type=int, default=16)
     pilot_loop_parser.add_argument("--learning-rate", type=float, default=1e-3)
     pilot_loop_parser.add_argument("--base-channels", type=int, default=32)
+    pilot_loop_parser.add_argument("--heatmap-sigma", type=float, default=1.5)
     pilot_loop_parser.add_argument("--model-arch", default="baseline", choices=["baseline", "unet_lite"])
     pilot_loop_parser.add_argument("--loader-mode", default="sample", choices=["sample", "shard_grouped"])
     pilot_loop_parser.add_argument("--shard-cache-size", type=int, default=0)
     pilot_loop_parser.add_argument("--num-workers", type=int, default=0)
     pilot_loop_parser.add_argument("--pin-memory", default="auto", choices=["auto", "true", "false"])
+    _add_loss_arguments(pilot_loop_parser)
     pilot_loop_parser.add_argument("--device", default="cpu")
     pilot_loop_parser.add_argument("--seed", type=int, default=42)
     pilot_loop_parser.add_argument("--candidate-threshold", type=float, default=0.2)
@@ -216,11 +285,13 @@ def main(argv: list[str] | None = None) -> int:
     research_run_parser.add_argument("--batch-size", type=int, default=16)
     research_run_parser.add_argument("--learning-rate", type=float, default=1e-3)
     research_run_parser.add_argument("--base-channels", type=int, default=32)
+    research_run_parser.add_argument("--heatmap-sigma", type=float, default=1.5)
     research_run_parser.add_argument("--model-arch", default="baseline", choices=["baseline", "unet_lite"])
     research_run_parser.add_argument("--loader-mode", default="sample", choices=["sample", "shard_grouped"])
     research_run_parser.add_argument("--shard-cache-size", type=int, default=0)
     research_run_parser.add_argument("--num-workers", type=int, default=0)
     research_run_parser.add_argument("--pin-memory", default="auto", choices=["auto", "true", "false"])
+    _add_loss_arguments(research_run_parser)
     research_run_parser.add_argument("--device", default="cpu")
     research_run_parser.add_argument("--seed", type=int, default=42)
     research_run_parser.add_argument("--candidate-threshold", type=float, default=0.2)
@@ -309,6 +380,45 @@ def main(argv: list[str] | None = None) -> int:
     research_next_parser.add_argument("--root", default="reports/research_runs", help="research run root")
     research_next_parser.add_argument("--output", required=True, help="JSON evidence ledger output path")
 
+    research_agent_plan_parser = subparsers.add_parser(
+        "research-agent-plan",
+        help="write the next autonomous research plan from the current evidence board",
+    )
+    research_agent_plan_parser.add_argument("--program", required=True, help="source research program JSON")
+    research_agent_plan_parser.add_argument("--root", default="reports/research_runs", help="research run root")
+    research_agent_plan_parser.add_argument("--output", required=True, help="JSON agent program output path")
+    research_agent_plan_parser.add_argument("--markdown-output", help="Markdown agent plan output path")
+    research_agent_plan_parser.add_argument(
+        "--autonomy",
+        default="small_runs_then_gated_long_runs",
+        choices=["small_runs_then_gated_long_runs", "fully_automatic"],
+    )
+    research_agent_plan_parser.add_argument(
+        "--budget",
+        default="conservative",
+        choices=["conservative", "medium", "aggressive"],
+    )
+    research_agent_plan_parser.add_argument(
+        "--approve-pending",
+        action="append",
+        default=[],
+        help="pending approval variant id to promote into the automatic queue; repeatable",
+    )
+
+    audit_parser = subparsers.add_parser(
+        "research-evidence-audit",
+        help="audit two existing pilot-loop runs with paired strata and bootstrap deltas",
+    )
+    audit_parser.add_argument("--baseline-run-dir", required=True, help="baseline research run directory")
+    audit_parser.add_argument("--target-run-dir", required=True, help="target research run directory")
+    audit_parser.add_argument("--output", required=True, help="JSON audit output path")
+    audit_parser.add_argument("--markdown-output", help="Markdown audit output path")
+    audit_parser.add_argument("--baseline-label", default="baseline")
+    audit_parser.add_argument("--target-label", default="target")
+    audit_parser.add_argument("--seed", type=int, default=42)
+    audit_parser.add_argument("--bootstrap-iterations", type=int, default=200)
+    audit_parser.add_argument("--bootstrap-max-thresholds", type=int, default=128)
+
     args = parser.parse_args(argv)
     if args.command == "split":
         return _split_command(args)
@@ -324,6 +434,14 @@ def main(argv: list[str] | None = None) -> int:
         return _build_dataset_command(args)
     if args.command == "evaluate":
         return _evaluate_command(args)
+    if args.command == "research-synthetic-injection":
+        return _research_synthetic_injection_command(args)
+    if args.command == "research-synthetic-faint-diagnostic":
+        return _research_synthetic_faint_diagnostic_command(args)
+    if args.command == "research-synthetic-heatmap-diagnostic":
+        return _research_synthetic_heatmap_diagnostic_command(args)
+    if args.command == "research-synthetic-morphology-diagnostic":
+        return _research_synthetic_morphology_diagnostic_command(args)
     if args.command == "sweep-thresholds":
         return _sweep_thresholds_command(args)
     if args.command == "train":
@@ -350,6 +468,10 @@ def main(argv: list[str] | None = None) -> int:
         return _research_diagnose_command(args)
     if args.command == "research-next":
         return _research_next_command(args)
+    if args.command == "research-agent-plan":
+        return _research_agent_plan_command(args)
+    if args.command == "research-evidence-audit":
+        return _research_evidence_audit_command(args)
     raise AssertionError(f"unhandled command: {args.command}")
 
 
@@ -458,6 +580,70 @@ def _evaluate_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _research_synthetic_injection_command(args: argparse.Namespace) -> int:
+    from .synthetic_validation import build_synthetic_injection_validation
+
+    build_synthetic_injection_validation(
+        checkpoint_path=args.checkpoint,
+        dataset_dir=args.dataset,
+        output_dir=args.output_dir,
+        split_path=args.split,
+        split_name=args.split_name,
+        device=args.device,
+        seed=args.seed,
+        num_backgrounds=args.num_backgrounds,
+        injections_per_background=args.injections_per_background,
+        threshold=args.threshold,
+        nms_radius=args.nms_radius,
+        match_radius_pixels=args.match_radius_pixels,
+        max_detections_per_cutout=args.max_detections_per_cutout,
+        shard_cache_size=args.shard_cache_size,
+        psf_sigma=args.psf_sigma,
+    )
+    return 0
+
+
+def _research_synthetic_faint_diagnostic_command(args: argparse.Namespace) -> int:
+    from .synthetic_diagnostics import build_synthetic_faint_recovery_diagnostic
+
+    build_synthetic_faint_recovery_diagnostic(
+        validation_dir=args.validation_dir,
+        output_dir=args.output_dir,
+        threshold=args.threshold,
+        match_radius_pixels=args.match_radius_pixels,
+        max_thresholds=args.max_thresholds,
+    )
+    return 0
+
+
+def _research_synthetic_heatmap_diagnostic_command(args: argparse.Namespace) -> int:
+    from .synthetic_diagnostics import build_synthetic_heatmap_response_diagnostic
+
+    build_synthetic_heatmap_response_diagnostic(
+        validation_dir=args.validation_dir,
+        output_dir=args.output_dir,
+        device=args.device,
+        search_radius_pixels=args.search_radius_pixels,
+        low_floor=args.low_floor,
+        shard_cache_size=args.shard_cache_size,
+    )
+    return 0
+
+
+def _research_synthetic_morphology_diagnostic_command(args: argparse.Namespace) -> int:
+    from .synthetic_diagnostics import build_synthetic_morphology_diagnostic
+
+    build_synthetic_morphology_diagnostic(
+        validation_dir=args.validation_dir,
+        output_dir=args.output_dir,
+        device=args.device,
+        search_radius_pixels=args.search_radius_pixels,
+        low_floor=args.low_floor,
+        shard_cache_size=args.shard_cache_size,
+    )
+    return 0
+
+
 def _sweep_thresholds_command(args: argparse.Namespace) -> int:
     truth = load_source_catalog(args.truth)
     predictions = load_prediction_catalog(args.predictions)
@@ -495,11 +681,18 @@ def _train_command(args: argparse.Namespace) -> int:
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
             base_channels=args.base_channels,
+            heatmap_sigma=args.heatmap_sigma,
             model_arch=args.model_arch,
             loader_mode=args.loader_mode,
             shard_cache_size=args.shard_cache_size,
             num_workers=args.num_workers,
             pin_memory=args.pin_memory,
+            loss_variant=args.loss_variant,
+            center_loss_weight=args.center_loss_weight,
+            photometry_loss_weight=args.photometry_loss_weight,
+            multiband_loss_weight=args.multiband_loss_weight,
+            psf_reconstruction_loss_weight=args.psf_reconstruction_loss_weight,
+            class_loss_weight=args.class_loss_weight,
             device=args.device,
             seed=args.seed,
             split_path=args.split,
@@ -539,6 +732,9 @@ def _predict_command(args: argparse.Namespace) -> int:
             split_name=args.split_name,
             max_detections_per_cutout=args.max_detections_per_cutout,
             limit_samples=args.limit_samples,
+            shard_cache_size=args.shard_cache_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_memory,
         )
         return 0
     write_prediction_catalog([], args.output)
@@ -562,11 +758,18 @@ def _run_pilot_loop_command(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         base_channels=args.base_channels,
+        heatmap_sigma=args.heatmap_sigma,
         model_arch=args.model_arch,
         loader_mode=args.loader_mode,
         shard_cache_size=args.shard_cache_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
+        loss_variant=args.loss_variant,
+        center_loss_weight=args.center_loss_weight,
+        photometry_loss_weight=args.photometry_loss_weight,
+        multiband_loss_weight=args.multiband_loss_weight,
+        psf_reconstruction_loss_weight=args.psf_reconstruction_loss_weight,
+        class_loss_weight=args.class_loss_weight,
         device=args.device,
         seed=args.seed,
         candidate_threshold=args.candidate_threshold,
@@ -611,11 +814,18 @@ def _research_run_command(args: argparse.Namespace) -> int:
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
             base_channels=args.base_channels,
+            heatmap_sigma=args.heatmap_sigma,
             model_arch=args.model_arch,
             loader_mode=args.loader_mode,
             shard_cache_size=args.shard_cache_size,
             num_workers=args.num_workers,
             pin_memory=args.pin_memory,
+            loss_variant=args.loss_variant,
+            center_loss_weight=args.center_loss_weight,
+            photometry_loss_weight=args.photometry_loss_weight,
+            multiband_loss_weight=args.multiband_loss_weight,
+            psf_reconstruction_loss_weight=args.psf_reconstruction_loss_weight,
+            class_loss_weight=args.class_loss_weight,
             device=args.device,
             seed=args.seed,
             candidate_threshold=args.candidate_threshold,
@@ -745,6 +955,38 @@ def _research_next_command(args: argparse.Namespace) -> int:
     from .research_program import build_evidence_ledger
 
     build_evidence_ledger(args.root, output_path=args.output)
+    return 0
+
+
+def _research_agent_plan_command(args: argparse.Namespace) -> int:
+    from .research_agent import write_research_agent_plan
+
+    write_research_agent_plan(
+        args.program,
+        root=args.root,
+        output_path=args.output,
+        markdown_output_path=args.markdown_output,
+        autonomy=args.autonomy,
+        budget=args.budget,
+        approve_pending=args.approve_pending,
+    )
+    return 0
+
+
+def _research_evidence_audit_command(args: argparse.Namespace) -> int:
+    from .evidence_audit import write_evidence_audit
+
+    write_evidence_audit(
+        baseline_run_dir=args.baseline_run_dir,
+        target_run_dir=args.target_run_dir,
+        output_path=args.output,
+        markdown_output_path=args.markdown_output,
+        baseline_label=args.baseline_label,
+        target_label=args.target_label,
+        seed=args.seed,
+        bootstrap_iterations=args.bootstrap_iterations,
+        bootstrap_max_thresholds=args.bootstrap_max_thresholds,
+    )
     return 0
 
 

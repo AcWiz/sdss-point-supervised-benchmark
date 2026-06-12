@@ -263,12 +263,39 @@ def stratified_detection_report(
     records: Sequence[SourceRecord],
     matches: MatchResult,
     bins_by_field: Mapping[str, Sequence[float]],
-) -> dict[str, Mapping[str, dict[str, float]]]:
+) -> dict[str, Mapping[str, dict[str, float]] | dict[str, object]]:
     """Return detection completeness reports for multiple truth fields."""
 
     return {
-        field: binned_detection_metrics(records, matches, bins, field=field)
+        field: binned_detection_status(records, matches, bins, field=field)
         for field, bins in bins_by_field.items()
+    }
+
+
+def binned_detection_status(
+    records: Sequence[SourceRecord],
+    matches: MatchResult,
+    bins: Sequence[float],
+    field: str = "mag_r",
+) -> dict[str, object]:
+    values = [
+        getattr(record, field)
+        for record in records
+        if getattr(record, field) is not None
+    ]
+    if not values:
+        return {
+            "status": "unavailable",
+            "reason": "no finite values in truth catalog",
+            "total_truth": float(len(records)),
+            "available_truth": 0.0,
+            "bins": {},
+        }
+    return {
+        "status": "available",
+        "total_truth": float(len(records)),
+        "available_truth": float(len(values)),
+        "bins": binned_detection_metrics(records, matches, bins, field=field),
     }
 
 

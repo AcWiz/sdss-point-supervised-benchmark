@@ -24,9 +24,20 @@ class StratifiedDeblendingTests(unittest.TestCase):
             {"mag_r": [18.0, 20.0, 22.0, 24.0], "snr": [0.0, 5.0, 10.0, 100.0]},
         )
 
-        self.assertAlmostEqual(report["mag_r"]["[18.0,20.0)"]["recall"], 1.0)
-        self.assertAlmostEqual(report["mag_r"]["[20.0,22.0)"]["recall"], 0.0)
-        self.assertAlmostEqual(report["snr"]["[5.0,10.0)"]["recall"], 1.0)
+        self.assertEqual(report["mag_r"]["status"], "available")
+        self.assertAlmostEqual(report["mag_r"]["bins"]["[18.0,20.0)"]["recall"], 1.0)
+        self.assertAlmostEqual(report["mag_r"]["bins"]["[20.0,22.0)"]["recall"], 0.0)
+        self.assertAlmostEqual(report["snr"]["bins"]["[5.0,10.0)"]["recall"], 1.0)
+
+    def test_stratified_detection_marks_missing_fields_unavailable(self):
+        truth = [SourceRecord("t1", "c1", 10.0, 0.0, "star", mag_r=18.5)]
+        predictions = [PredictionRecord("p1", "c1", 10.0, 0.0, "star", 0.9)]
+        matches = match_catalogs(truth, predictions, radius_arcsec=1.0)
+
+        report = stratified_detection_report(truth, matches, {"seeing": [0.0, 1.0, 2.0]})
+
+        self.assertEqual(report["seeing"]["status"], "unavailable")
+        self.assertEqual(report["seeing"]["bins"], {})
 
     def test_deblending_metrics_focus_on_close_pairs_and_flux_error(self):
         truth = [

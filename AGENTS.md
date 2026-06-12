@@ -24,6 +24,8 @@ make test
 - Method: PSF-constrained point-supervised catalog generation.
 - Hardware assumption: single machine with 1-2 GPUs.
 - First real dataset: `/Data/sdss/sdss_dr17_l1735_1865_b30_40`.
+- For research-agent sessions, first read
+  `docs/research/codex_research_agent.md` and follow its start/end protocol.
 
 ## Artifact Locations
 

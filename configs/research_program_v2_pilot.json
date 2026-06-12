@@ -10,13 +10,13 @@
   "checkpoint_root": "artifacts/checkpoints/research_runs",
   "defaults": {
     "epochs": 5,
-    "batch_size": 64,
+    "batch_size": 128,
     "learning_rate": 0.001,
     "base_channels": 32,
     "model_arch": "baseline",
     "loader_mode": "shard_grouped",
-    "shard_cache_size": 2,
-    "num_workers": 2,
+    "shard_cache_size": 4,
+    "num_workers": 4,
     "pin_memory": "auto",
     "device": "cuda:0",
     "seed": 42,
@@ -73,6 +73,7 @@
     {
       "variant_id": "pilot100_baseline_e50",
       "depends_on": ["pilot100_baseline_e5"],
+      "dependency_gate": "candidate_evidence",
       "objective": "Run paper-scale baseline pilot training for stable comparison.",
       "hypothesis": "The compact baseline should provide a stable 50-epoch pilot reference under the fixed split.",
       "tags": ["pilot", "fixed_split", "native_frame", "baseline", "paper_scale_candidate"],
@@ -85,6 +86,7 @@
     {
       "variant_id": "pilot100_unet_lite_e50",
       "depends_on": ["pilot100_unet_lite_e5"],
+      "dependency_gate": "candidate_evidence",
       "objective": "Run paper-scale lightweight UNet pilot training for architecture evidence.",
       "hypothesis": "The lightweight UNet should produce stronger 50-epoch pilot AP or recall than the compact baseline.",
       "tags": ["pilot", "fixed_split", "native_frame", "unet_lite", "paper_scale_candidate"],
@@ -92,6 +94,130 @@
       "run": {
         "epochs": 50,
         "model_arch": "unet_lite"
+      }
+    },
+    {
+      "variant_id": "throughput_unet_lite_bs192_e1",
+      "objective": "Probe UNet-lite batch-size 192 throughput and memory without changing completed e50 evidence.",
+      "hypothesis": "UNet-lite batch size 192 should increase GPU memory use while remaining below the 20GB reserved-memory probe gate.",
+      "tags": ["pilot", "fixed_split", "native_frame", "unet_lite", "throughput_probe"],
+      "claims": ["engineering_throughput"],
+      "run": {
+        "epochs": 1,
+        "train_limit_samples": 4096,
+        "predict_limit": 512,
+        "batch_size": 192,
+        "model_arch": "unet_lite"
+      }
+    },
+    {
+      "variant_id": "throughput_unet_lite_bs256_e1",
+      "depends_on": ["throughput_unet_lite_bs192_e1"],
+      "dependency_gate": "engineering_check",
+      "objective": "Probe UNet-lite batch-size 256 throughput if batch size 192 is stable.",
+      "hypothesis": "UNet-lite batch size 256 may be stable if peak reserved memory at 192 is well below 20GB.",
+      "tags": ["pilot", "fixed_split", "native_frame", "unet_lite", "throughput_probe"],
+      "claims": ["engineering_throughput"],
+      "run": {
+        "epochs": 1,
+        "train_limit_samples": 4096,
+        "predict_limit": 512,
+        "batch_size": 256,
+        "model_arch": "unet_lite"
+      }
+    },
+    {
+      "variant_id": "throughput_baseline_bs192_e1",
+      "objective": "Probe baseline batch-size 192 throughput under the same limited protocol as UNet-lite.",
+      "hypothesis": "The compact baseline should fit batch size 192 and provide matched throughput context.",
+      "tags": ["pilot", "fixed_split", "native_frame", "baseline", "throughput_probe"],
+      "claims": ["engineering_throughput"],
+      "run": {
+        "epochs": 1,
+        "train_limit_samples": 4096,
+        "predict_limit": 512,
+        "batch_size": 192,
+        "model_arch": "baseline"
+      }
+    },
+    {
+      "variant_id": "throughput_baseline_bs256_e1",
+      "depends_on": ["throughput_baseline_bs192_e1"],
+      "dependency_gate": "engineering_check",
+      "objective": "Probe baseline batch-size 256 throughput under the same limited protocol as UNet-lite.",
+      "hypothesis": "The compact baseline should fit batch size 256 and provide matched throughput context if UNet-lite can be tested there.",
+      "tags": ["pilot", "fixed_split", "native_frame", "baseline", "throughput_probe"],
+      "claims": ["engineering_throughput"],
+      "run": {
+        "epochs": 1,
+        "train_limit_samples": 4096,
+        "predict_limit": 512,
+        "batch_size": 256,
+        "model_arch": "baseline"
+      }
+    },
+    {
+      "variant_id": "ablation_full_psf_unet_lite_e5",
+      "objective": "Screen the full PSF-constrained point-supervised UNet-lite method for ablation comparison.",
+      "hypothesis": "The full loss should reproduce candidate evidence before loss-term ablations are scaled.",
+      "tags": ["pilot", "fixed_split", "native_frame", "unet_lite", "method_ablation"],
+      "claims": ["psf_constrained_method", "ablation_screen"],
+      "run": {
+        "epochs": 5,
+        "model_arch": "unet_lite",
+        "loss_variant": "full_psf_point_supervised"
+      }
+    },
+    {
+      "variant_id": "ablation_no_psf_unet_lite_e5",
+      "objective": "Screen whether removing PSF reconstruction weakens the UNet-lite method.",
+      "hypothesis": "Setting PSF reconstruction weight to zero should reduce evidence if the PSF constraint contributes useful supervision.",
+      "tags": ["pilot", "fixed_split", "native_frame", "unet_lite", "method_ablation"],
+      "claims": ["psf_constrained_method", "ablation_screen"],
+      "run": {
+        "epochs": 5,
+        "model_arch": "unet_lite",
+        "loss_variant": "no_psf_reconstruction"
+      }
+    },
+    {
+      "variant_id": "ablation_center_only_unet_lite_e5",
+      "objective": "Screen center-only point heatmap supervision against the full UNet-lite method.",
+      "hypothesis": "Center-only supervision should underperform the PSF-constrained full loss if reconstruction and auxiliary heads matter.",
+      "tags": ["pilot", "fixed_split", "native_frame", "unet_lite", "method_ablation"],
+      "claims": ["psf_constrained_method", "ablation_screen"],
+      "run": {
+        "epochs": 5,
+        "model_arch": "unet_lite",
+        "loss_variant": "center_only"
+      }
+    },
+    {
+      "variant_id": "ablation_no_psf_unet_lite_e20",
+      "depends_on": ["ablation_no_psf_unet_lite_e5"],
+      "dependency_gate": "candidate_evidence",
+      "objective": "Extend no-PSF ablation to 20 epochs only if the e5 screen passes the candidate gate.",
+      "hypothesis": "A 20-epoch no-PSF run should clarify whether the gap is a loss-term effect rather than early optimization noise.",
+      "tags": ["pilot", "fixed_split", "native_frame", "unet_lite", "method_ablation"],
+      "claims": ["psf_constrained_method", "ablation_screen"],
+      "run": {
+        "epochs": 20,
+        "model_arch": "unet_lite",
+        "loss_variant": "no_psf_reconstruction"
+      }
+    },
+    {
+      "variant_id": "ablation_center_only_unet_lite_e20",
+      "depends_on": ["ablation_center_only_unet_lite_e5"],
+      "dependency_gate": "candidate_evidence",
+      "objective": "Extend center-only ablation to 20 epochs only if the e5 screen passes the candidate gate.",
+      "hypothesis": "A 20-epoch center-only run should clarify whether auxiliary losses improve detection in faint or crowded regimes.",
+      "tags": ["pilot", "fixed_split", "native_frame", "unet_lite", "method_ablation"],
+      "claims": ["psf_constrained_method", "ablation_screen"],
+      "run": {
+        "epochs": 20,
+        "model_arch": "unet_lite",
+        "loss_variant": "center_only"
       }
     }
   ]

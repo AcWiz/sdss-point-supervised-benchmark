@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .automation import ResearchRunSpec, build_plan_payload, evaluate_claim_gate
+from .evidence_audit import load_evidence_audits
 from .experiment import PROTOCOL
 from .pilot_loop import load_json, write_json
 
@@ -22,6 +23,7 @@ class ResearchVariantSpec:
     run: dict[str, Any]
     claims: tuple[str, ...]
     depends_on: tuple[str, ...] = ()
+    dependency_gate: str = "complete"
 
 
 @dataclass(frozen=True)
@@ -58,10 +60,9 @@ def load_research_program(path: str | Path) -> ResearchProgramSpec:
                 run=dict(row.get("run", {})),
                 claims=tuple(str(claim) for claim in row.get("claims", [])),
                 depends_on=tuple(str(dep) for dep in row.get("depends_on", [])),
+                dependency_gate=str(row.get("dependency_gate", "complete")),
             )
         )
-    if not variants:
-        raise ValueError("research program must define at least one variant")
     return ResearchProgramSpec(
         program_id=str(payload.get("program_id") or ""),
         objective=str(payload.get("objective") or ""),
@@ -104,11 +105,18 @@ def expand_research_program(
                 batch_size=int(merged.pop("batch_size", 16)),
                 learning_rate=float(merged.pop("learning_rate", 1e-3)),
                 base_channels=int(merged.pop("base_channels", 32)),
+                heatmap_sigma=float(merged.pop("heatmap_sigma", 1.5)),
                 model_arch=str(merged.pop("model_arch", "baseline")),
                 loader_mode=str(merged.pop("loader_mode", "sample")),
                 shard_cache_size=int(merged.pop("shard_cache_size", 0)),
                 num_workers=int(merged.pop("num_workers", 0)),
                 pin_memory=merged.pop("pin_memory", "auto"),
+                loss_variant=str(merged.pop("loss_variant", "full_psf_point_supervised")),
+                center_loss_weight=optional_float(merged.pop("center_loss_weight", None)),
+                photometry_loss_weight=optional_float(merged.pop("photometry_loss_weight", None)),
+                multiband_loss_weight=optional_float(merged.pop("multiband_loss_weight", None)),
+                psf_reconstruction_loss_weight=optional_float(merged.pop("psf_reconstruction_loss_weight", None)),
+                class_loss_weight=optional_float(merged.pop("class_loss_weight", None)),
                 device=str(merged.pop("device", "cpu")),
                 seed=int(merged.pop("seed", 42)),
                 candidate_threshold=float(merged.pop("candidate_threshold", 0.2)),
@@ -159,6 +167,7 @@ def write_program_plan(
                 "claims": list(spec.claims),
                 "claim_gate_policy": dict(spec.claim_gate_policy or {}),
                 "depends_on": list(variant.depends_on),
+                "dependency_gate": variant.dependency_gate,
                 "spec": stringify_paths(build_plan_payload(spec, {"status": "not_run"}).get("spec", {})),
             }
         )
@@ -251,10 +260,12 @@ def build_registry_entry(report: dict[str, Any]) -> dict[str, Any]:
             "train_limit_samples": run_options.get("train_limit_samples"),
             "batch_size": run_options.get("batch_size"),
             "base_channels": run_options.get("base_channels"),
+            "heatmap_sigma": run_options.get("heatmap_sigma"),
             "model_arch": run_options.get("model_arch"),
             "loader_mode": run_options.get("loader_mode"),
             "predict_limit": run_options.get("predict_limit"),
             "device": run_options.get("device"),
+            "loss_variant": run_options.get("loss_variant"),
         },
     }
 
@@ -262,6 +273,7 @@ def build_registry_entry(report: dict[str, Any]) -> dict[str, Any]:
 def build_research_board(root: str | Path) -> dict[str, Any]:
     reports = load_run_reports(root)
     entries = [build_registry_entry(report) for report in reports]
+    audits = load_evidence_audits(root)
     by_gate: dict[str, int] = {}
     for entry in entries:
         gate = str(entry.get("claim_gate") or "unknown")
@@ -277,6 +289,7 @@ def build_research_board(root: str | Path) -> dict[str, Any]:
         "runs": len(entries),
         "claim_gate_counts": by_gate,
         "best_by_f1": best_by_f1,
+        "evidence_audits": [audit_board_summary(audit) for audit in audits],
         "entries": entries,
     }
 
@@ -295,7 +308,31 @@ def compare_research_runs(root: str | Path, *, run_ids: list[str] | None = None)
             "ap": delta(metrics.get("ap"), baseline.get("ap")),
             "recall": delta(metrics.get("recall"), baseline.get("recall")),
         }
-    return {"schema_version": REGISTRY_SCHEMA_VERSION, "root": str(root), "runs": len(rows), "rows": rows}
+    return {
+        "schema_version": REGISTRY_SCHEMA_VERSION,
+        "root": str(root),
+        "runs": len(rows),
+        "rows": rows,
+        "evidence_audits": [audit_board_summary(audit) for audit in load_evidence_audits(root)],
+    }
+
+
+def audit_board_summary(audit: dict[str, Any]) -> dict[str, Any]:
+    aggregate = audit.get("aggregate", {}) if isinstance(audit.get("aggregate"), dict) else {}
+    delta_row = aggregate.get("delta", {}) if isinstance(aggregate, dict) else {}
+    bootstrap = audit.get("bootstrap", {}) if isinstance(audit.get("bootstrap"), dict) else {}
+    claim_summary = audit.get("claim_summary", {}) if isinstance(audit.get("claim_summary"), dict) else {}
+    return {
+        "path": audit.get("_audit_path", ""),
+        "baseline_label": audit.get("baseline_label", "baseline"),
+        "target_label": audit.get("target_label", "target"),
+        "delta_f1": delta_row.get("f1"),
+        "delta_ap": delta_row.get("ap"),
+        "delta_recall": delta_row.get("recall"),
+        "bootstrap_delta_ci": bootstrap.get("delta_ci", {}),
+        "available_strata": claim_summary.get("available_strata", []),
+        "unavailable_strata": claim_summary.get("unavailable_strata", {}),
+    }
 
 
 def build_diagnosis(report_path: str | Path) -> dict[str, Any]:
@@ -385,6 +422,14 @@ def render_board_markdown(board: dict[str, Any]) -> str:
             f"- {entry.get('run_id', '')}: F1={metrics.get('f1')} AP={metrics.get('ap')} "
             f"gate={entry.get('claim_gate', '')}"
         )
+    if board.get("evidence_audits"):
+        lines.extend(["", "## Evidence Audits", ""])
+        for audit in board.get("evidence_audits", []):
+            lines.append(
+                f"- {audit.get('target_label', 'target')} vs {audit.get('baseline_label', 'baseline')}: "
+                f"delta F1={audit.get('delta_f1')} delta AP={audit.get('delta_ap')} "
+                f"delta recall={audit.get('delta_recall')}"
+            )
     lines.append("")
     return "\n".join(lines)
 
@@ -404,6 +449,14 @@ def render_compare_markdown(compare: dict[str, Any]) -> str:
                 ap=metrics.get("ap"),
             )
         )
+    if compare.get("evidence_audits"):
+        lines.extend(["", "## Evidence Audits", ""])
+        for audit in compare.get("evidence_audits", []):
+            lines.append(
+                f"- {audit.get('target_label', 'target')} vs {audit.get('baseline_label', 'baseline')}: "
+                f"delta F1={audit.get('delta_f1')} delta AP={audit.get('delta_ap')} "
+                f"delta recall={audit.get('delta_recall')}"
+            )
     lines.append("")
     return "\n".join(lines)
 
@@ -450,6 +503,12 @@ def optional_str(value: Any) -> str | None:
     return str(value)
 
 
+def optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
 def float_or_none(value: Any) -> float | None:
     if value is None:
         return None
@@ -485,11 +544,13 @@ def gate_report_with_program_policy(
         epochs=int(report.get("run_options", {}).get("epochs", 0) or 0),
         train_limit_samples=report.get("run_options", {}).get("train_limit_samples"),
         batch_size=int(report.get("run_options", {}).get("batch_size", 1) or 1),
+        heatmap_sigma=float(report.get("run_options", {}).get("heatmap_sigma", 1.5) or 1.5),
         model_arch=str(report.get("run_options", {}).get("model_arch", "baseline")),
         loader_mode=str(report.get("run_options", {}).get("loader_mode", "sample")),
         shard_cache_size=int(report.get("run_options", {}).get("shard_cache_size", 0) or 0),
         num_workers=int(report.get("run_options", {}).get("num_workers", 0) or 0),
         pin_memory=report.get("run_options", {}).get("pin_memory", "auto"),
+        loss_variant=str(report.get("run_options", {}).get("loss_variant", "full_psf_point_supervised")),
         predict_limit=report.get("run_options", {}).get("predict_limit"),
         tags=tuple(str(tag) for tag in report.get("tags", [])),
     )

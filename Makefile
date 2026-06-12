@@ -1,4 +1,4 @@
-.PHONY: test lint smoke test-conda lint-conda smoke-conda verify-conda check-cuda-conda env-create env-update dataset-pilot-dry-run dataset-pilot train-pilot predict-pilot pilot-loop-smoke research-smoke-dry-run research-smoke research-pilot research-report-existing research-program-dry-run research-program-execute research-autopilot-dry-run research-autopilot research-board research-next research-compare-latest research-diagnose-latest
+.PHONY: test lint smoke test-conda lint-conda smoke-conda verify-conda check-cuda-conda env-create env-update dataset-pilot-dry-run dataset-pilot train-pilot predict-pilot pilot-loop-smoke research-smoke-dry-run research-smoke research-pilot research-report-existing research-program-dry-run research-program-execute research-autopilot-dry-run research-autopilot research-e50-audit research-board research-next research-agent-plan research-compare-latest research-diagnose-latest
 
 PYTHON ?= python
 CONDA_ENV ?= sdss_point_py311
@@ -27,6 +27,10 @@ RESEARCH_AUTOPILOT_OUT ?= reports/research_scheduler/pilot_v2
 RESEARCH_ROOT ?= reports/research_runs
 RESEARCH_COMPARE_OUT ?= reports/research_runs/compare_latest.json
 RESEARCH_DIAGNOSE_REPORT ?= $(RESEARCH_REPORT_DIR)/report.json
+RESEARCH_E50_BASELINE_RUN ?= reports/research_runs/sdss_point_catalog_v2_pilot_pilot100_baseline_e50
+RESEARCH_E50_TARGET_RUN ?= reports/research_runs/sdss_point_catalog_v2_pilot_pilot100_unet_lite_e50
+RESEARCH_E50_AUDIT_OUT ?= reports/research_runs/e50_evidence_audit.json
+RESEARCH_AGENT_PLAN_OUT ?= reports/research_runs/agent_plan.json
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src $(PYTHON) -m unittest discover -s tests
@@ -208,6 +212,16 @@ research-autopilot:
 		--output-dir $(RESEARCH_AUTOPILOT_OUT) \
 		--execute
 
+research-e50-audit:
+	PYTHONPATH=src $(PYTHON) -m sdss_point_benchmark.cli research-evidence-audit \
+		--baseline-run-dir $(RESEARCH_E50_BASELINE_RUN) \
+		--target-run-dir $(RESEARCH_E50_TARGET_RUN) \
+		--baseline-label baseline_e50 \
+		--target-label unet_lite_e50 \
+		--seed 42 \
+		--output $(RESEARCH_E50_AUDIT_OUT) \
+		--markdown-output $(RESEARCH_E50_AUDIT_OUT:.json=.md)
+
 research-board:
 	PYTHONPATH=src $(PYTHON) -m sdss_point_benchmark.cli research-board \
 		--root $(RESEARCH_ROOT) \
@@ -219,6 +233,13 @@ research-next:
 	PYTHONPATH=src $(PYTHON) -m sdss_point_benchmark.cli research-next \
 		--root $(RESEARCH_ROOT) \
 		--output $(RESEARCH_ROOT)/evidence_ledger.json
+
+research-agent-plan:
+	PYTHONPATH=src $(PYTHON) -m sdss_point_benchmark.cli research-agent-plan \
+		--program $(RESEARCH_AUTOPILOT_PROGRAM) \
+		--root $(RESEARCH_ROOT) \
+		--output $(RESEARCH_AGENT_PLAN_OUT) \
+		--markdown-output $(RESEARCH_AGENT_PLAN_OUT:.json=.md)
 
 research-compare-latest:
 	PYTHONPATH=src $(PYTHON) -m sdss_point_benchmark.cli research-compare \

@@ -33,11 +33,18 @@ class ResearchRunSpec:
     batch_size: int = 16
     learning_rate: float = 1e-3
     base_channels: int = 32
+    heatmap_sigma: float = 1.5
     model_arch: str = "baseline"
     loader_mode: str = "sample"
     shard_cache_size: int = 0
     num_workers: int = 0
     pin_memory: bool | str = "auto"
+    loss_variant: str = "full_psf_point_supervised"
+    center_loss_weight: float | None = None
+    photometry_loss_weight: float | None = None
+    multiband_loss_weight: float | None = None
+    psf_reconstruction_loss_weight: float | None = None
+    class_loss_weight: float | None = None
     device: str = "cpu"
     seed: int = 42
     candidate_threshold: float = 0.2
@@ -89,11 +96,18 @@ def run_research_run(spec: ResearchRunSpec) -> dict[str, Any]:
             batch_size=spec.batch_size,
             learning_rate=spec.learning_rate,
             base_channels=spec.base_channels,
+            heatmap_sigma=spec.heatmap_sigma,
             model_arch=spec.model_arch,
             loader_mode=spec.loader_mode,
             shard_cache_size=spec.shard_cache_size,
             num_workers=spec.num_workers,
             pin_memory=spec.pin_memory,
+            loss_variant=spec.loss_variant,
+            center_loss_weight=spec.center_loss_weight,
+            photometry_loss_weight=spec.photometry_loss_weight,
+            multiband_loss_weight=spec.multiband_loss_weight,
+            psf_reconstruction_loss_weight=spec.psf_reconstruction_loss_weight,
+            class_loss_weight=spec.class_loss_weight,
             device=spec.device,
             seed=spec.seed,
             candidate_threshold=spec.candidate_threshold,
@@ -145,11 +159,18 @@ def write_report_from_existing_pilot_loop(
         train_limit_samples=summary.get("training", {}).get("train_limit_samples"),
         batch_size=int(summary.get("training", {}).get("batch_size", 0)),
         base_channels=int(summary.get("training", {}).get("base_channels", 0)),
+        heatmap_sigma=float(summary.get("training", {}).get("heatmap_sigma", 1.5)),
         model_arch=str(summary.get("training", {}).get("model_arch", "baseline")),
         loader_mode=str(summary.get("training", {}).get("loader", {}).get("mode", "sample")),
         shard_cache_size=int(summary.get("training", {}).get("loader", {}).get("shard_cache_size", 0) or 0),
         num_workers=int(summary.get("training", {}).get("loader", {}).get("num_workers", 0) or 0),
         pin_memory=summary.get("training", {}).get("loader", {}).get("pin_memory", "auto"),
+        loss_variant=str(summary.get("training", {}).get("loss", {}).get("variant", "full_psf_point_supervised")),
+        center_loss_weight=summary.get("training", {}).get("loss", {}).get("center_weight"),
+        photometry_loss_weight=summary.get("training", {}).get("loss", {}).get("photometry_weight"),
+        multiband_loss_weight=summary.get("training", {}).get("loss", {}).get("multiband_weight"),
+        psf_reconstruction_loss_weight=summary.get("training", {}).get("loss", {}).get("psf_reconstruction_weight"),
+        class_loss_weight=summary.get("training", {}).get("loss", {}).get("class_weight"),
         device=str(summary.get("training", {}).get("device", "")),
         seed=int(summary.get("training", {}).get("seed", 0)),
         candidate_threshold=float(summary.get("decode", {}).get("candidate_threshold", 0.0)),
@@ -337,11 +358,18 @@ def build_research_report(
             "batch_size": spec.batch_size,
             "learning_rate": spec.learning_rate,
             "base_channels": spec.base_channels,
+            "heatmap_sigma": spec.heatmap_sigma,
             "model_arch": spec.model_arch,
             "loader_mode": spec.loader_mode,
             "shard_cache_size": spec.shard_cache_size,
             "num_workers": spec.num_workers,
             "pin_memory": spec.pin_memory,
+            "loss_variant": spec.loss_variant,
+            "center_loss_weight": spec.center_loss_weight,
+            "photometry_loss_weight": spec.photometry_loss_weight,
+            "multiband_loss_weight": spec.multiband_loss_weight,
+            "psf_reconstruction_loss_weight": spec.psf_reconstruction_loss_weight,
+            "class_loss_weight": spec.class_loss_weight,
             "device": spec.device,
             "seed": spec.seed,
             "candidate_threshold": spec.candidate_threshold,
@@ -399,6 +427,7 @@ def summarize_metrics(pilot_outputs: Mapping[str, dict] | None) -> dict[str, Any
             "astrometry": test_metrics.get("metrics", {}).get("astrometry", {}),
             "classification": test_metrics.get("metrics", {}).get("classification", {}),
             "deblending": test_metrics.get("metrics", {}).get("deblending", {}),
+            "stratified_detection": test_metrics.get("metrics", {}).get("stratified_detection", {}),
         },
     }
 
@@ -568,6 +597,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
     metrics = report.get("metrics", {})
     test = metrics.get("test", {}) if isinstance(metrics, Mapping) else {}
     detection = test.get("detection", {}) if isinstance(test, Mapping) else {}
+    stratified = test.get("stratified_detection", {}) if isinstance(test, Mapping) else {}
     claim_gate = report.get("claim_gate", {})
     lines = [
         f"# Research Run {report.get('run_id', '')}",
@@ -586,9 +616,20 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         f"- F1: {detection.get('f1', 'n/a')}",
         f"- TP/FP/FN: {detection.get('tp', 'n/a')}/{detection.get('fp', 'n/a')}/{detection.get('fn', 'n/a')}",
         "",
-        "## Next Actions",
+        "## Stratified Detection",
         "",
     ]
+    if isinstance(stratified, Mapping) and stratified:
+        for field, item in sorted(stratified.items()):
+            if isinstance(item, Mapping):
+                lines.append(f"- {field}: {item.get('status', 'available')}")
+    else:
+        lines.append("- n/a")
+    lines.extend([
+        "",
+        "## Next Actions",
+        "",
+    ])
     for item in report.get("next_actions", []):
         lines.append(f"- [{item.get('priority', '')}] {item.get('action', '')}")
     lines.append("")
